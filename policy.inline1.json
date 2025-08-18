@@ -1,0 +1,1 @@
+{"Version":"2012-10-17","Statement":[{"Sid":"AllowListBucketForPrefix","Effect":"Allow","Action":["s3:ListBucket"],"Resource":"arn:aws:s3:::testmapanimationbucket","Condition":{"StringLike":{"s3:prefix":["map-anim/*"]}}}]}

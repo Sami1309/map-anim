@@ -1,0 +1,1 @@
+{"Version":"2012-10-17","Statement":[{"Sid":"AllowPutObjectsInPrefix","Effect":"Allow","Action":["s3:PutObject","s3:PutObjectAcl","s3:AbortMultipartUpload","s3:PutObjectTagging"],"Resource":"arn:aws:s3:::testmapanimationbucket/map-anim/*"}]}

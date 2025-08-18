@@ -1,0 +1,29 @@
+{
+    "name": "map-anim-service",
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": {
+        "dev": "tsx watch src/server.ts",
+        "start": "node dist/server.js",
+        "build": "tsc",
+        "test:webgl": "tsx scripts/test-webgl.ts",
+        "iam:put-user-policy": "tsx scripts/iam-put-user-policy.ts"
+    },
+    "dependencies": {
+        "node-fetch": "^3.3.2",
+        "topojson-client": "^3.1.0",
+        "@aws-sdk/client-iam": "^3.864.0",
+        "@aws-sdk/client-s3": "^3.678.0",
+        "@aws-sdk/lib-storage": "^3.678.0",
+        "dotenv": "^16.4.5",
+        "express": "^4.19.2",
+        "openai": "^4.56.0",
+        "puppeteer": "^22.12.1",
+        "uuid": "^9.0.1",
+        "zod": "^3.23.8"
+    },
+    "devDependencies": {
+        "tsx": "^4.15.7",
+        "typescript": "^5.5.4"
+    }
+}
