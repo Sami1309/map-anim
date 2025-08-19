@@ -5,7 +5,7 @@
     "scripts": {
         "dev": "tsx watch src/server.ts",
         "start": "node dist/server.js",
-        "build": "tsc",
+        "build": "tsc && cp src/renderer-page.html dist/renderer-page.html",
         "test:webgl": "tsx scripts/test-webgl.ts",
         "iam:put-user-policy": "tsx scripts/iam-put-user-policy.ts"
     },

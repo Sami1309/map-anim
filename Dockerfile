@@ -18,6 +18,8 @@ COPY --chown=pptruser:pptruser src ./src
 # 4) Build
 RUN npm run build
 
+RUN mkdir -p dist && cp src/renderer-page.html dist/renderer-page.html
+
 ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
