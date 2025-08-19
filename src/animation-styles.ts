@@ -23,10 +23,9 @@ export const STYLES: Record<AnimationStyleId, StyleDef> = {
     description: "Smooth ease-out zoom, crisp labels at the end, subtle thick border.",
     llmHint: "cinematic zoom-in ending smoothly, labels limited to the target country at the end",
     defaults: {
-      animation: { easing: "easeOutCubic" },
       labels: { restrictToCountry: true, applyAt: "final" },
       border: { strokeWidth: 6, opacity: 1, color: '#ffcc00', traceColor: '#ffffff', traceWidthDelta: 1, traceAfterZoom: true, traceDurationMs: 3000, traceHoldMs: 2000, showDuringZoom: false, showStaticAfterTrace: true },
-      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 100 }
+      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 100, easing: "easeOutCubic"  }
     }
   },
   documentary_focus: {
@@ -45,10 +44,9 @@ export const STYLES: Record<AnimationStyleId, StyleDef> = {
     description: "Bold border with post-zoom tracing animation around the country outline.",
     llmHint: "tech style with animated border tracing after zoom",
     defaults: {
-      animation: { easing: "easeOutQuad" },
       labels: { restrictToCountry: true, applyAt: "final" },
       border: { strokeWidth: 8, opacity: 1, color: '#ffcc00', traceColor: '#ffffff', traceWidthDelta: 1, traceAfterZoom: true, traceDurationMs: 3000, traceHoldMs: 2000, showDuringZoom: false, showStaticAfterTrace: true },
-      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 100 }
+      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 100, easing: "easeOutQuad" }
     }
   },
   fast_preview: {
@@ -58,9 +56,8 @@ export const STYLES: Record<AnimationStyleId, StyleDef> = {
     defaults: {
       output: { fps: 30, waitForTiles: false, pixelRatio: 1 },
       labels: { restrictToCountry: false, applyAt: "final" },
-      animation: { easing: "linear" },
       border: { strokeWidth: 4, opacity: 1, color: '#ffcc00', traceColor: '#ffffff', traceWidthDelta: 1, traceAfterZoom: true, traceDurationMs: 2000, traceHoldMs: 1000, showDuringZoom: false, showStaticAfterTrace: true },
-      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 80 }
+      animation: { phases: ["zoom","trace","hold"], fitFinalToBorder: true, fitPaddingPx: 80, easing: "linear" }
     }
   }
 };

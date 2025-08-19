@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer";
@@ -19,7 +19,7 @@ app.use(express.json({ limit: "1mb" }));
 const stylesDir = path.join(__dirname, "..", "styles");
 app.use(
   "/styles",
-  (req, res, next) => {
+  (req: Request, res: Response, next: NextFunction) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "*");
@@ -29,14 +29,14 @@ app.use(
   express.static(stylesDir)
 );
 
-app.get("/healthz", (_, res) => res.send("ok"));
+app.get("/healthz", (_: Request, res: Response) => res.send("ok"));
 
 /**
  * POST /api/animate
  * body: { text: string }
  * returns: { url: string, program: MapProgram }
  */
-app.post("/api/animate", async (req, res) => {
+app.post("/api/animate", async (req: Request, res: Response) => {
   try {
     // Accept either a natural-language `text` or a structured `program`
     const text: string | undefined = req.body?.text;
@@ -83,7 +83,6 @@ app.post("/api/animate", async (req, res) => {
     } else {
       const derived = resolveRemoteStyle();
       if (derived) {
-        // @ts-expect-error allow mutation before validation by page
         program.style = derived;
       }
     }
@@ -160,7 +159,6 @@ app.post("/api/animate", async (req, res) => {
     }
     program = applyPerformanceToggles(program);
 
-    // @ts-expect-error mutation before validation by page
     program.style = await withMaptilerKey(program.style);
 
     // 2) Launch headless Chrome (try multiple WebGL-friendly flag sets)
@@ -291,10 +289,10 @@ app.post("/api/animate", async (req, res) => {
       console.log("[renderer:borders] fetching", localPath ? `local:${localPath}` : remoteUrl);
       const res = await fetch(remoteUrl);
       if (!res.ok) throw new Error(`Failed to fetch borders: ${res.status}`);
-      const data = await res.json();
-      if (data && data.type === 'Topology') {
+      const data = await res.json() as any;
+      if (data && typeof data === 'object' && data.type === 'Topology') {
         try {
-          const geo = topojson.feature(data, (data as any).objects.countries);
+          const geo = topojson.feature(data, data.objects.countries);
           return geo;
         } catch (e) {
           console.warn('[renderer:borders] Topology detected but conversion failed; returning raw', e);
