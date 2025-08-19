@@ -16,7 +16,8 @@
   <!-- Scripts are injected by Puppeteer (server) to avoid cross-site blockers. -->
 
   <script>
-    // --- Utility: WebGL availability check
+    // --- Shared Animation Core Functions (inline version) ---
+    // Utility: WebGL availability check
     function isWebglSupported() {
       const c = document.createElement('canvas');
       const gl = c.getContext('webgl2') || c.getContext('webgl');
@@ -45,7 +46,7 @@
       return [i, Math.min(i + 1, keyframes.length - 1)];
     }
 
-    // Helpers
+    // Color helpers
     function getBorderColor(p) { return (p?.border?.color) || '#ffcc00'; }
     function getTraceColor(p) { return (p?.border?.traceColor) || '#ffffff'; }
     function getTraceDelta(p) { return Math.max(0, Number(p?.border?.traceWidthDelta ?? 1)); }
@@ -58,6 +59,64 @@
         if (isFinite(lng) && isFinite(lat)) return [Number(lng), Number(lat)];
       }
       return undefined;
+    }
+
+    // --- Shared Map Core Functions (inline version) ---
+    // Build linework from polygons for crisp outlines and tracing
+    function polygonToLines(fc) {
+      const out = { type: 'FeatureCollection', features: [] };
+      for (const f of fc.features) {
+        const g = f.geometry;
+        const props = f.properties || {};
+        if (!g) continue;
+        if (g.type === 'Polygon') {
+          for (const ring of g.coordinates) {
+            out.features.push({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: ring } });
+          }
+        } else if (g.type === 'MultiPolygon') {
+          for (const poly of g.coordinates) {
+            for (const ring of poly) {
+              out.features.push({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: ring } });
+            }
+          }
+        }
+      }
+      return out;
+    }
+
+    // Filter border data by ISO3 code  
+    function filterBordersByISO3(borderData, ISO3) {
+      const feats = borderData.features.filter(f => {
+        const p = f.properties || {};
+        return [p.ADM0_A3, p.ISO_A3, p["ISO3166-1-Alpha-3"], p.iso_a3]
+          .map(x => (x || "").toString().toUpperCase())
+          .includes(ISO3);
+      });
+      
+      let matched = feats;
+      if (!matched.length) {
+        // Fallback: match by 'name' using a small ISO3->Name map (helps with world-atlas datasets)
+        const isoToName = { 
+          ESP: 'Spain', FRA: 'France', DEU: 'Germany', ITA: 'Italy', GBR: 'United Kingdom', 
+          USA: 'United States of America', MEX: 'Mexico', CAN: 'Canada', BRA: 'Brazil', 
+          AUS: 'Australia', JPN: 'Japan', CHN: 'China', IND: 'India', RUS: 'Russia' 
+        };
+        const target = (isoToName[ISO3] || '').toUpperCase();
+        if (target) {
+          matched = borderData.features.filter(f => ((f.properties?.name || '').toString().toUpperCase()) === target);
+          if (!matched.length) {
+            // Some datasets use NAME or NAME_EN
+            matched = borderData.features.filter(f => {
+              const p = f.properties || {};
+              return [p.NAME, p.NAME_EN, p.name_long].map(x => (x||'').toString().toUpperCase()).includes(target);
+            });
+          }
+          console.log(`[renderer] fallback name match for ${ISO3}=${target} features=${matched.length}`);
+        }
+      }
+      console.log(`[renderer] border match iso3=${ISO3} features=${matched.length}`);
+      
+      return { type: "FeatureCollection", features: matched };
     }
 
     async function runZoomPhase(map, encoder, program, fps, duration, frameCount, ease) {
@@ -202,57 +261,12 @@
       // Borders: ask Node side to provide GeoJSON (local file or server-side fetch)
       const borderData = await window.__nodeGetBordersGeoJSON();
 
-      // Filter the feature for the requested ISO3 (ADM0_A3/ISO_A3/ISO3166-1-Alpha-3 cover common fields)
+      // Filter the feature for the requested ISO3 using shared function
       const ISO3 = (program.border?.isoA3 || '').toString().toUpperCase();
-      const feats = borderData.features.filter(f => {
-        const p = f.properties || {};
-        return [p.ADM0_A3, p.ISO_A3, p["ISO3166-1-Alpha-3"], p.iso_a3]
-          .map(x => (x || "").toString().toUpperCase())
-          .includes(ISO3);
-      });
-      let matched = feats;
-      if (!matched.length) {
-        // Fallback: match by 'name' using a small ISO3->Name map (helps with world-atlas datasets)
-        const isoToName = { ESP: 'Spain', FRA: 'France', DEU: 'Germany', ITA: 'Italy', GBR: 'United Kingdom', USA: 'United States of America', MEX: 'Mexico', CAN: 'Canada', BRA: 'Brazil', AUS: 'Australia', JPN: 'Japan', CHN: 'China', IND: 'India', RUS: 'Russia' };
-        const target = (isoToName[ISO3] || '').toUpperCase();
-        if (target) {
-          matched = borderData.features.filter(f => ((f.properties?.name || '').toString().toUpperCase()) === target);
-          if (!matched.length) {
-            // Some datasets use NAME or NAME_EN
-            matched = borderData.features.filter(f => {
-              const p = f.properties || {};
-              return [p.NAME, p.NAME_EN, p.name_long].map(x => (x||'').toString().toUpperCase()).includes(target);
-            });
-          }
-          console.log(`[renderer] fallback name match for ${ISO3}=${target} features=${matched.length}`);
-        }
-      }
-      console.log(`[renderer] border match iso3=${ISO3} features=${matched.length}`);
-
-      const highlight = { type: "FeatureCollection", features: matched };
+      const highlight = filterBordersByISO3(borderData, ISO3);
       map.addSource("border_src", { type: "geojson", data: highlight });
 
-      // Build linework from polygons for crisp outlines and tracing
-      function polygonToLines(fc) {
-        const out = { type: 'FeatureCollection', features: [] };
-        for (const f of fc.features) {
-          const g = f.geometry;
-          const props = f.properties || {};
-          if (!g) continue;
-          if (g.type === 'Polygon') {
-            for (const ring of g.coordinates) {
-              out.features.push({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: ring } });
-            }
-          } else if (g.type === 'MultiPolygon') {
-            for (const poly of g.coordinates) {
-              for (const ring of poly) {
-                out.features.push({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: ring } });
-              }
-            }
-          }
-        }
-        return out;
-      }
+      // Build linework from polygons for crisp outlines and tracing using shared function
       const borderLines = polygonToLines(highlight);
       console.log(`[renderer] border polygons=${highlight.features.length}, lineFeatures=${borderLines.features.length}`);
       try {

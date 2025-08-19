@@ -9,12 +9,16 @@ import { MapProgram as MapProgramSchema } from "./program-schema.js";
 import type { MapProgram as MapProgramType } from "./program-schema.js";
 import fetch from "node-fetch";
 import * as topojson from "topojson-client";
-import { putVideoWebm } from "./storage.js";
+import { putVideoWebm, putJsonTemplate } from "./storage.js";
 import { applyAnimationStyle } from "./animation-styles.js";
+import cors from "cors";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+const corsOrigin = process.env.CORS_ORIGIN || "*";
+app.use(cors({ origin: corsOrigin }));
 // Serve local MapLibre styles from the repo's styles folder
 const stylesDir = path.join(__dirname, "..", "styles");
 app.use(
@@ -30,6 +34,30 @@ app.use(
 );
 
 app.get("/healthz", (_: Request, res: Response) => res.send("ok"));
+
+app.post("/api/llm/parse", async (req, res) => {
+  try {
+    const text: string = req.body?.text;
+    if (!text) return res.status(400).json({ error: "Missing 'text'." });
+    const program: MapProgramType = await nlToProgram(text);
+    res.json({ program });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "llm_failed" });
+  }
+});
+
+app.post("/api/templates", async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body?.name || !body?.program) {
+      return res.status(400).json({ error: "Need {name, program}" });
+    }
+    const url = await putJsonTemplate(body.name, body.program);
+    res.json({ url });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "template_failed" });
+  }
+});
 
 /**
  * POST /api/animate

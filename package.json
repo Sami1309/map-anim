@@ -13,6 +13,7 @@
         "@aws-sdk/client-iam": "^3.864.0",
         "@aws-sdk/client-s3": "^3.678.0",
         "@aws-sdk/lib-storage": "^3.678.0",
+        "cors": "^2.8.5",
         "dotenv": "^16.4.5",
         "express": "^4.19.2",
         "node-fetch": "^3.3.2",
@@ -23,6 +24,7 @@
         "zod": "^3.23.8"
     },
     "devDependencies": {
+        "@types/cors": "^2.8.19",
         "@types/express": "^5.0.3",
         "@types/topojson-client": "^3.1.5",
         "tsx": "^4.15.7",
