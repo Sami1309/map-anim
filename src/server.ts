@@ -159,6 +159,18 @@ app.post("/api/animate", async (req: Request, res: Response) => {
     }
     program = applyPerformanceToggles(program);
 
+    // Optional hard caps for output dimensions to avoid heavy readbacks
+    function applyOutputCaps(p: any) {
+      const mw = Number(process.env.RENDER_MAX_WIDTH || 0);
+      const mh = Number(process.env.RENDER_MAX_HEIGHT || 0);
+      if (p?.output) {
+        if (mw && Number.isFinite(mw)) p.output.width = Math.min(p.output.width, mw);
+        if (mh && Number.isFinite(mh)) p.output.height = Math.min(p.output.height, mh);
+      }
+      return p;
+    }
+    program = applyOutputCaps(program);
+
     program.style = await withMaptilerKey(program.style);
 
     // 2) Launch headless Chrome (try multiple WebGL-friendly flag sets)

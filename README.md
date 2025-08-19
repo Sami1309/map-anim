@@ -87,6 +87,17 @@ MapTiler key injection
 - Example `.env`:
   - `MAPTILER_KEY=pk.your_maptiler_api_key`
 
+Render-safe performance controls
+
+- Defaults aim for speed (reduced stalls) unless `RENDER_QUALITY=high`.
+- Env knobs:
+  - `RENDER_QUALITY`: `fast` (default) or `high`.
+  - `RENDER_WAIT_FOR_TILES`: `1`/`true` to wait; default depends on quality.
+  - `RENDER_PIXEL_RATIO`: force 1–4; `fast` defaults to 1 if unset.
+  - `RENDER_MAX_FPS`: cap FPS (e.g., 30).
+  - `RENDER_MAX_WIDTH` / `RENDER_MAX_HEIGHT`: hard caps for resolution.
+  - On platforms like Render, prefer 1280x720, 30fps, pixelRatio=1, and avoid waiting for tiles to minimize `readPixels` stalls.
+
 Example env for restricted networks
 
 ```
