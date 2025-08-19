@@ -75,14 +75,7 @@ export default function MapPreview({
   useEffect(() => {
     if (!mapRef.current) return;
     
-    const originalStyleUrl = program?.style || "https://demotiles.maplibre.org/style.json";
-    let styleUrl = originalStyleUrl;
-    
-    // Handle MapTiler styles with key placeholder - fall back to default in frontend
-    if (styleUrl.includes('{key}')) {
-      console.warn('MapTiler style with key placeholder detected, using default style for preview');
-      styleUrl = "https://demotiles.maplibre.org/style.json";
-    }
+    const styleUrl = program?.style || "https://demotiles.maplibre.org/style.json";
     
     // Always set style when it changes - MapLibre will handle if it's the same
     mapRef.current.setStyle(styleUrl);

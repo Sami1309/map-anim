@@ -4,6 +4,8 @@ export interface MapStyle {
   description?: string;
 }
 
+const API = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:8080";
+
 export const MAP_STYLES: MapStyle[] = [
   {
     name: "Default (MapLibre)",
@@ -11,9 +13,9 @@ export const MAP_STYLES: MapStyle[] = [
     description: "Basic tokenless style - always works"
   },
   {
-    name: "Dark Matter",
-    url: "https://raw.githubusercontent.com/openmaptiles/dark-matter-gl-style/master/style.json",
-    description: "Dark theme with minimal labels"
+    name: "Dark Matter (with MapTiler tiles)",
+    url: `${API}/style.json`,
+    description: "Dark theme using MapTiler vector tiles (requires key)"
   },
   {
     name: "Positron",
@@ -31,14 +33,14 @@ export const MAP_STYLES: MapStyle[] = [
     description: "Clean basic style"
   },
   {
-    name: "MapTiler Streets (Requires Key)",
+    name: "MapTiler Streets",
     url: "https://api.maptiler.com/maps/streets-v2/style.json?key={key}",
-    description: "High-quality streets - backend only"
+    description: "High-quality streets - backend rendering only"
   },
   {
-    name: "MapTiler Satellite (Requires Key)", 
+    name: "MapTiler Satellite", 
     url: "https://api.maptiler.com/maps/satellite/style.json?key={key}",
-    description: "Satellite imagery - backend only"
+    description: "Satellite imagery - backend rendering only"
   }
 ];
 

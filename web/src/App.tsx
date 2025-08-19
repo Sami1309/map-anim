@@ -92,9 +92,9 @@ export default function App() {
   function handleStyleChange(url: string) {
     setSelectedStyleUrl(url);
     
-    // Warn about MapTiler styles needing backend processing
-    if (url.includes('{key}')) {
-      alert('MapTiler styles with {key} placeholder work best when rendered on the backend. Preview may show default style.');
+    // Warn about MapTiler styles that are backend-only (direct API calls)
+    if (url.includes('api.maptiler.com') && url.includes('{key}')) {
+      alert('This style is optimized for backend rendering. Preview will work, but final render will have higher quality.');
     }
     
     if (program) {

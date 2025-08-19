@@ -35,6 +35,40 @@ app.use(
 
 app.get("/healthz", (_: Request, res: Response) => res.send("ok"));
 
+// Serve a patched style.json with MAPTILER_KEY injected for frontend preview usage
+app.get("/style.json", async (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    const isUrl = (s: string) => /^(https?:|data:)/i.test(s);
+    const remote = process.env.MAP_STYLE_REMOTE || "https://github.com/openmaptiles/dark-matter-gl-style";
+    let styleUrl = remote;
+    if (!/\.json(\?|#|$)/i.test(remote)) {
+      const m = remote.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)(?:\/|$)/i);
+      if (m) {
+        const org = m[1];
+        const repo = m[2];
+        const branch = process.env.MAP_STYLE_REMOTE_BRANCH || "master";
+        const pathInRepo = process.env.MAP_STYLE_REMOTE_PATH || "style.json";
+        styleUrl = `https://raw.githubusercontent.com/${org}/${repo}/${branch}/${pathInRepo}`;
+      } else if (!isUrl(remote)) {
+        return res.status(400).json({ error: "MAP_STYLE_REMOTE must be a URL or GitHub repo" });
+      }
+    }
+    const r = await fetch(styleUrl);
+    if (!r.ok) return res.status(r.status).send(await r.text());
+    let txt = await r.text();
+    const key = process.env.MAPTILER_KEY || "";
+    if (key) {
+      txt = txt.replace(/\{key\}/g, key).replace(/%7Bkey%7D/gi, encodeURIComponent(key)).replace(/\$\{key\}/g, key);
+    }
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.send(txt);
+  } catch (e: any) {
+    console.error("/style.json error", e);
+    return res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
 app.post("/api/llm/parse", async (req, res) => {
   try {
     const text: string = req.body?.text;

@@ -77,20 +77,49 @@ export async function runTracePhase(map, program, fps) {
   const traceFrames = Math.max(1, Math.ceil((traceMs / 1000) * fps));
   const frameSkip = fastMode ? (program.animation?.traceFrameSkip ?? 2) : 1; // Skip frames in fast mode
   console.log(`[progress] trace-start: frames=${traceFrames}, ms=${traceMs}, fastMode=${fastMode}, frameSkip=${frameSkip}`);
-  const traceEvery = Math.max(10, Math.floor(traceFrames / 10)); // More frequent progress updates
+  const traceEvery = Math.max(5, Math.floor(traceFrames / 20)); // More frequent progress updates for preview
   const showDuringZoom = !!(program.border?.showDuringZoom);
   const borderOpacity = program.border?.opacity ?? 1;
+
+  // Ensure trace layer exists and is visible
+  try {
+    if (!map.getLayer('border_trace')) {
+      console.error('Border trace layer not found - trace animation will not be visible');
+      return;
+    }
+  } catch (e) {
+    console.error('Error checking for border_trace layer:', e);
+    return;
+  }
 
   if (!showDuringZoom) {
     try { map.setPaintProperty('border_line', 'line-opacity', 0); } catch {}
     try { map.setPaintProperty('border_drawn', 'line-opacity', 0); } catch {}
   }
 
-  for (let j = 0; j < traceFrames; j += frameSkip) {
-    const prog = j / Math.max(1, traceFrames - 1) + 0.03;
-    const gradTrace = [ 'interpolate', ['linear'], ['line-progress'], 0, 'rgba(255,255,255,0.0)', Math.max(0, prog - 0.02), 'rgba(255,255,255,0.0)', prog, 'rgba(255,255,255,1.0)', Math.min(1, prog + 0.02), 'rgba(255,255,255,0.0)', 1, 'rgba(255,255,255,0.0)' ];
+  // Ensure we always complete the trace by including the final frame
+  const totalSteps = Math.ceil(traceFrames / frameSkip);
+  
+  for (let step = 0; step < totalSteps; step++) {
+    const j = Math.min(step * frameSkip, traceFrames - 1); // Ensure we don't exceed bounds
+    const prog = Math.min(j / Math.max(1, traceFrames - 1) + 0.03, 1.0);
+    
+    const gradTrace = [ 'interpolate', ['linear'], ['line-progress'], 
+      0, 'rgba(255,255,255,0.0)', 
+      Math.max(0, prog - 0.02), 'rgba(255,255,255,0.0)', 
+      prog, 'rgba(255,255,255,1.0)', 
+      Math.min(1, prog + 0.02), 'rgba(255,255,255,0.0)', 
+      1, 'rgba(255,255,255,0.0)' 
+    ];
+    
     const borderCol = getBorderColor(program);
-    const gradDrawn = [ 'interpolate', ['linear'], ['line-progress'], 0, borderCol, Math.max(0, prog), borderCol, Math.min(1, prog + 0.001), 'rgba(255,204,0,0.0)', 1, 'rgba(255,204,0,0.0)' ];
+    const gradDrawn = [ 'interpolate', ['linear'], ['line-progress'], 
+      0, borderCol, 
+      Math.max(0, prog), borderCol, 
+      Math.min(1, prog + 0.001), 'rgba(255,204,0,0.0)', 
+      1, 'rgba(255,204,0,0.0)' 
+    ];
+    
     try {
       map.setPaintProperty('border_trace', 'line-gradient', gradTrace);
       map.setPaintProperty('border_trace', 'line-color', getTraceColor(program));
@@ -99,6 +128,7 @@ export async function runTracePhase(map, program, fps) {
       map.setPaintProperty('border_drawn', 'line-opacity', borderOpacity);
     } catch (e) {
       console.error('[renderer] trace setPaintProperty error', e?.message || e);
+      // Fallback to simple colors without gradients
       try {
         map.setPaintProperty('border_trace', 'line-gradient', undefined);
         map.setPaintProperty('border_trace', 'line-color', getTraceColor(program));
@@ -116,9 +146,9 @@ export async function runTracePhase(map, program, fps) {
       await new Promise(res => map.once('idle', res));
     }
     
-    if (j % traceEvery === 0 || j >= traceFrames - frameSkip) {
-      const done = Math.min(j + 1, traceFrames); const left = traceFrames - done; const pct = Math.round((done / traceFrames) * 100);
-      console.log(`[progress] trace ${done}/${traceFrames} (${pct}%), left=${left}`);
+    if (step % traceEvery === 0 || step === totalSteps - 1) {
+      const done = step + 1; const pct = Math.round((done / totalSteps) * 100);
+      console.log(`[progress] trace step ${done}/${totalSteps} (${pct}%), frame ${j}/${traceFrames}`);
     }
   }
   try { map.setPaintProperty('border_trace', 'line-opacity', 0.0); } catch {}

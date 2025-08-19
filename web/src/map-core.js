@@ -112,7 +112,7 @@ async function setupBorderLinesLayer(map, program) {
       paint: {
         "line-color": getBorderColor(program),
         "line-width": program.border.strokeWidth ?? 4,
-        "line-opacity": showDuringZoom ? (program.border?.opacity ?? 1) : 0,
+        "line-opacity": showDuringZoom ? (program.border?.opacity ?? 1) : 1, // Always visible for preview
         "line-blur": 0
       },
       layout: {
@@ -120,7 +120,7 @@ async function setupBorderLinesLayer(map, program) {
         "line-cap": "round"
       }
     }); 
-    console.log('[map-core] added layer border_line'); 
+    console.log('[map-core] added layer border_line with opacity:', showDuringZoom ? (program.border?.opacity ?? 1) : 1); 
   } catch (e) { 
     console.error('[map-core] addLayer border_line error', e?.message || e); 
   }
