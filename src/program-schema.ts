@@ -90,7 +90,7 @@ export const MapProgram = z.object({
    * Which border(s) to highlight.
    * (Extend later to multiple or admin-1)
    */
-  border: BorderHighlight,
+  border: BorderHighlight.optional(),
   /**
    * Map style URL (default to MapLibre demo style if omitted).
    */
@@ -104,7 +104,45 @@ export const MapProgram = z.object({
   /**
    * How to encode the output
    */
-  output: OutputSpec
+  output: OutputSpec,
+  /** Optional augmentation flags for renderer features (terrain, deck.gl, etc.) */
+  // Keep permissive to avoid breaking existing clients; validation can be refined later.
+  flags: z
+    .object({
+      terrain: z.boolean().optional(),
+      terrainExaggeration: z.number().min(0.1).max(10).optional(),
+      sky: z.boolean().optional(),
+      buildings: z.boolean().optional(),
+      google3dApiKey: z.string().optional(),
+      google3dOpacity: z.number().min(0).max(1).optional()
+    })
+    .optional(),
+  /** Optional pre-fetched boundary GeoJSON to fill/outline in renderer */
+  boundaryGeoJSON: z.any().optional(),
+  /** Optional boundary styling for highlight phase */
+  boundaryFill: z.string().optional(),
+  boundaryFillOpacity: z.number().min(0).max(1).optional(),
+  boundaryLineColor: z.string().optional(),
+  boundaryLineWidth: z.number().min(0).max(20).optional(),
+  /** Optional animation plan */
+  animation: z
+    .object({
+      phases: z.array(z.enum(["zoom", "highlight", "trace", "hold", "wait"]))
+        .optional(),
+      waitBeforeTraceMs: z.number().nonnegative().optional(),
+      fitFinalToBorder: z.boolean().optional(),
+      fitPaddingPx: z.number().nonnegative().optional()
+    })
+    .optional(),
+  /** Optional extras suggested by NL parsing */
+  extras: z
+    .object({
+      address: z.string().optional(),
+      boundaryName: z.string().optional(),
+      boundaryAdminLevel: z.string().optional(),
+      flyThrough: z.boolean().optional()
+    })
+    .optional()
 });
 
 export type MapProgram = z.infer<typeof MapProgram>;

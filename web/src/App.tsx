@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./styles.css";
 import MapPreview from "./MapPreview";
-import { parsePrompt, renderProgram, saveTemplate } from "./api";
+import { resolveProgram, renderProgram, saveTemplate } from "./api";
 import type { MapProgram } from "./types";
 import { MAP_STYLES, MAP_SETTINGS, DEFAULT_ANIMATION_SETTINGS, FAST_ANIMATION_SETTINGS } from "./constants";
 import { getDefaultMapSettings, mergeAnimationSettings } from "./map-settings.js";
@@ -17,19 +17,66 @@ export default function App() {
   const [animationSettings, setAnimationSettings] = useState(DEFAULT_ANIMATION_SETTINGS);
   const [renderProgress, setRenderProgress] = useState<string | null>(null);
   const [showCodeView, setShowCodeView] = useState(false);
+  const [advancedEnabled, setAdvancedEnabled] = useState(false);
+  // New controls
+  const [address, setAddress] = useState("");
+  const [regionName, setRegionName] = useState("");
+  const [phaseHighlight, setPhaseHighlight] = useState(false);
+  const [phaseTrace, setPhaseTrace] = useState(false);
+  const [phaseHold, setPhaseHold] = useState(false);
+  const [phaseWait, setPhaseWait] = useState(false);
+  const [terrain, setTerrain] = useState(false);
+  const [google3dEnabled, setGoogle3dEnabled] = useState(false);
+  const [google3dKey, setGoogle3dKey] = useState<string>(() => localStorage.getItem('GOOGLE_TILE_API_KEY') || "");
 
+
+  function buildOverrides() {
+    const extras: any = {};
+    if (address.trim()) extras.address = address.trim();
+    if (regionName.trim()) extras.boundaryName = regionName.trim();
+    const phases: string[] = ['zoom'];
+    if (phaseHighlight) phases.push('highlight');
+    if (phaseTrace) phases.push('trace');
+    if (phaseWait) phases.push('wait');
+    if (phaseHold) phases.push('hold');
+    const flags: any = {};
+    if (terrain) flags.terrain = true;
+    if (google3dEnabled && google3dKey) flags.google3dApiKey = google3dKey;
+    const animation: any = { phases };
+    const override: any = { extras, animation, flags };
+    // style the user chose
+    if (selectedStyleUrl) override.style = selectedStyleUrl;
+    return override;
+  }
 
   async function onGenerate() {
     setBusy(true);
     setRenderProgress("Generating program...");
     try {
-      const prog = await parsePrompt(prompt);
-      // Use selected style URL instead of default
-      prog.style = selectedStyleUrl;
-      // Apply animation settings
-      const enhancedProg = mergeAnimationSettings(prog, animationSettings);
+      let resolved;
+      if (advancedEnabled) {
+        const override = buildOverrides();
+        resolved = await resolveProgram({ text: prompt, program: override });
+      } else {
+        resolved = await resolveProgram({ text: prompt });
+      }
+      const enhancedProg = mergeAnimationSettings(resolved, animationSettings);
       setProgram(enhancedProg);
       setVideoUrl(null);
+    } catch (e: any) {
+      try {
+        const msg = typeof e?.message === 'string' ? e.message : String(e);
+        // If server sent JSON, surface its error/details
+        let display = msg;
+        if (msg.startsWith('{')) {
+          const obj = JSON.parse(msg);
+          display = obj.error || obj.details || msg;
+        }
+        setRenderProgress(`Error: ${display}`);
+      } catch {
+        setRenderProgress('Error generating program');
+      }
+      setTimeout(() => setRenderProgress(null), 4000);
     } finally {
       setBusy(false);
       setRenderProgress(null);
@@ -51,9 +98,19 @@ export default function App() {
       setVideoUrl(url);
       setRenderProgress("Render complete!");
       setTimeout(() => setRenderProgress(null), 2000);
-    } catch (error) {
-      setRenderProgress("Render failed");
-      setTimeout(() => setRenderProgress(null), 3000);
+    } catch (e: any) {
+      try {
+        const msg = typeof e?.message === 'string' ? e.message : String(e);
+        let display = msg;
+        if (msg.startsWith('{')) {
+          const obj = JSON.parse(msg);
+          display = obj.error || obj.details || msg;
+        }
+        setRenderProgress(`Render failed: ${display}`);
+      } catch {
+        setRenderProgress('Render failed');
+      }
+      setTimeout(() => setRenderProgress(null), 4000);
     } finally {
       setBusy(false);
     }
@@ -89,16 +146,28 @@ export default function App() {
     }
   }
 
-  function handleStyleChange(url: string) {
+  async function handleStyleChange(url: string) {
     setSelectedStyleUrl(url);
     
     // Warn about MapTiler styles that are backend-only (direct API calls)
     if (url.includes('api.maptiler.com') && url.includes('{key}')) {
       alert('This style is optimized for backend rendering. Preview will work, but final render will have higher quality.');
     }
-    
+    // Re-resolve the current program with the chosen style so backend injects keys/CORS-safe data URL
     if (program) {
-      setProgram({ ...program, style: url });
+      setBusy(true);
+      setRenderProgress("Updating style...");
+      try {
+        const next = await resolveProgram({ program: { ...program, style: url } as any });
+        // Preserve client-side animation settings
+        const enhanced = mergeAnimationSettings(next, animationSettings);
+        setProgram(enhanced);
+      } catch (e) {
+        console.error('Style resolve failed', e);
+      } finally {
+        setBusy(false);
+        setRenderProgress(null);
+      }
     }
   }
 
@@ -136,6 +205,40 @@ export default function App() {
             ))}
           </select>
         </div>
+
+        <div className="row" style={{ marginTop: 12 }}>
+          <button type="button" onClick={() => setAdvancedEnabled(v => !v)}>
+            {advancedEnabled ? 'Hide Advanced Controls' : 'Show Advanced Controls'}
+          </button>
+        </div>
+
+        {advancedEnabled && (
+          <>
+            <h3>Address / Region</h3>
+            <div className="cfg">
+              <label>Address</label>
+              <input value={address} onChange={e => setAddress(e.target.value)} placeholder="1600 Amphitheatre Pkwy, Mountain View" />
+              <label>Region name</label>
+              <input value={regionName} onChange={e => setRegionName(e.target.value)} placeholder="Detroit" />
+            </div>
+
+            <h3>Phases</h3>
+            <div className="cfg">
+              <label className="checkbox"><input type="checkbox" checked={phaseHighlight} onChange={e => setPhaseHighlight(e.target.checked)} /> Highlight</label>
+              <label className="checkbox"><input type="checkbox" checked={phaseTrace} onChange={e => setPhaseTrace(e.target.checked)} /> Trace</label>
+              <label className="checkbox"><input type="checkbox" checked={phaseWait} onChange={e => setPhaseWait(e.target.checked)} /> Wait</label>
+              <label className="checkbox"><input type="checkbox" checked={phaseHold} onChange={e => setPhaseHold(e.target.checked)} /> Hold</label>
+            </div>
+
+            <h3>3D / Terrain</h3>
+            <div className="cfg">
+              <label className="checkbox"><input type="checkbox" checked={terrain} onChange={e => setTerrain(e.target.checked)} /> Terrain + Sky</label>
+              <label className="checkbox"><input type="checkbox" checked={google3dEnabled} onChange={e => setGoogle3dEnabled(e.target.checked)} /> Google Photorealistic 3D Tiles</label>
+              <label>Google Tile API Key</label>
+              <input value={google3dKey} onChange={e => { setGoogle3dKey(e.target.value); localStorage.setItem('GOOGLE_TILE_API_KEY', e.target.value); }} placeholder="AIza..." />
+            </div>
+          </>
+        )}
 
         <h3>Animation Settings</h3>
         <div className="cfg">

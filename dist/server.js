@@ -29,11 +29,14 @@ app.get("/healthz", (_, res) => res.send("ok"));
  * returns: { url: string, program: MapProgram }
  */
 app.post("/api/animate", async (req, res) => {
+    console.log("post to animate")
     try {
         // Accept either a natural-language `text` or a structured `program`
         const text = req.body?.text;
         const incomingProgram = req.body?.program;
         // 1) Natural language -> structured program (or validate provided program)
+        console.log("incoming text: ", text)
+        console.log("incoming program: ", program)
         let program;
         if (incomingProgram) {
             const parsed = MapProgramSchema.safeParse?.(incomingProgram);

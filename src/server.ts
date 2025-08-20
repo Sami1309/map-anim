@@ -10,7 +10,7 @@ import type { MapProgram as MapProgramType } from "./program-schema.js";
 import fetch from "node-fetch";
 import * as topojson from "topojson-client";
 import { putVideoWebm, putJsonTemplate } from "./storage.js";
-import { applyAnimationStyle } from "./animation-styles.js";
+import pThrottle from "p-throttle";
 import cors from "cors";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +80,211 @@ app.post("/api/llm/parse", async (req, res) => {
   }
 });
 
+// --- Geocode (Nominatim) with throttle per usage policy
+const NOM_HOST = process.env.NOMINATIM_HOST || "https://nominatim.openstreetmap.org";
+const NOM_UA = process.env.NOMINATIM_USER_AGENT || "map-anim-service/unknown";
+const geocodeThrottle = pThrottle({ limit: 1, interval: 1000 });
+const geocodeRaw = async (q: string) => {
+  const url = new URL("/search", NOM_HOST);
+  url.searchParams.set("q", q);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", "1");
+  const r = await fetch(url.toString(), { headers: { "User-Agent": NOM_UA, "Referer": "https://render.com" } as any });
+  if (!r.ok) throw new Error(`nominatim_${r.status}`);
+  const arr = (await r.json()) as any[];
+  if (!arr.length) throw new Error("not_found");
+  const { lat, lon, boundingbox } = arr[0] || {};
+  return { lat: Number(lat), lon: Number(lon), bbox: (boundingbox || []).map(Number) };
+};
+const geocode = geocodeThrottle(geocodeRaw);
+
+app.get("/api/geocode", async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q || "");
+    if (!q) return res.status(400).json({ error: "missing q" });
+    const data = await geocode(q);
+    res.json(data);
+  } catch (e: any) {
+    res.status(502).json({ error: e?.message || String(e) });
+  }
+});
+
+// --- Overpass boundary endpoint (simple city/area relation lookup)
+const OVERPASS = process.env.OVERPASS_URL || "https://overpass-api.de/api/interpreter";
+async function fetchBoundaryGeoJSON(name: string) {
+  const q = `
+[out:json][timeout:60];
+rel["boundary"="administrative"]["name"="${name}"];
+out ids; >; out geom;
+`;
+  const r = await fetch(OVERPASS, { method: "POST", body: q, headers: { "Content-Type": "text/plain" } as any });
+  if (!r.ok) throw new Error(`overpass_${r.status}`);
+  const data = (await r.json()) as any;
+  const features = (data.elements || [])
+    .filter((e: any) => e.type === "relation" && e.tags?.boundary === "administrative")
+    .map((rel: any) => {
+      const coords = (rel.members || [])
+        .filter((m: any) => m.geometry)
+        .map((m: any) => m.geometry.map((p: any) => [p.lon, p.lat]));
+      return { type: "Feature", properties: { id: rel.id, name: rel.tags?.name, admin_level: rel.tags?.admin_level }, geometry: { type: "MultiLineString", coordinates: coords } };
+    });
+  return { type: "FeatureCollection", features };
+}
+
+app.get("/api/osm/boundary", async (req: Request, res: Response) => {
+  try {
+    const name = String(req.query.name || "");
+    if (!name) return res.status(400).json({ error: "missing name" });
+    const gj = await fetchBoundaryGeoJSON(name);
+    res.json(gj);
+  } catch (e: any) {
+    res.status(502).json({ error: e?.message || String(e) });
+  }
+});
+
+// Resolve: produce a fully-augmented program (geocode, boundary, 3D flags, style substitution)
+app.post("/api/resolve", async (req: Request, res: Response) => {
+  try {
+    const text: string | undefined = req.body?.text;
+    const incomingProgram = req.body?.program;
+    let program: MapProgramType;
+    console.log("got", text, incomingProgram)
+    if (incomingProgram) {
+      const parsed = (MapProgramSchema as any).safeParse?.(incomingProgram);
+      if (!parsed?.success) return res.status(400).json({ error: "Invalid 'program' payload", details: parsed?.error?.message ?? parsed?.error });
+      program = parsed.data;
+    } else if (text) {
+      program = await nlToProgram(text);
+    } else {
+      return res.status(400).json({ error: "Provide 'text' or 'program'" });
+    }
+
+    
+    program = await augmentProgram(program, text);
+
+    console.log("program is augemnted")
+    console.log(program)
+    
+    // Resolve style and MapTiler key substitution (same path as animate)
+    const isUrl = (s: string) => /^(https?:|data:)/i.test(s);
+    function resolveRemoteStyle(): string | undefined {
+      const remote = process.env.MAP_STYLE_REMOTE || "https://github.com/openmaptiles/dark-matter-gl-style";
+      if (!remote) return undefined;
+      if (/\.json(\?|#|$)/i.test(remote)) return remote;
+      const m = remote.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)(?:\/|$)/i);
+      if (m) {
+        const org = m[1];
+        const repo = m[2];
+        const branch = process.env.MAP_STYLE_REMOTE_BRANCH || "master";
+        const pathInRepo = process.env.MAP_STYLE_REMOTE_PATH || "style.json";
+        return `https://raw.githubusercontent.com/${org}/${repo}/${branch}/${pathInRepo}`;
+      }
+      return remote;
+    }
+    if (!program.style) {
+      const derived = resolveRemoteStyle();
+      if (derived) program.style = derived as any;
+    }
+    if (process.env.MAPTILER_KEY) {
+      program.style = (await (async (styleUrl: string) => {
+        try {
+          const r = await fetch(styleUrl);
+          if (!r.ok) return styleUrl;
+          let txt = await r.text();
+          const key = process.env.MAPTILER_KEY!;
+          txt = txt.replace(/\{key\}/g, key).replace(/%7Bkey%7D/gi, encodeURIComponent(key)).replace(/\$\{key\}/g, key);
+          return "data:application/json;charset=utf-8;base64," + Buffer.from(txt, "utf8").toString("base64");
+        } catch { return styleUrl; }
+      })(program.style as any)) as any;
+    }
+
+    // Apply performance toggles as in animate (so preview matches)
+    program = (function applyPerformanceToggles(p: any) {
+      const quality = (process.env.RENDER_QUALITY || 'fast').toLowerCase();
+      const envWait = process.env.RENDER_WAIT_FOR_TILES;
+      const envPxr = process.env.RENDER_PIXEL_RATIO;
+      const envMaxFps = process.env.RENDER_MAX_FPS;
+      if (!p.output) p.output = {};
+      if (typeof envWait !== 'undefined') p.output.waitForTiles = /^(1|true|yes)$/i.test(String(envWait));
+      else if (typeof p.output.waitForTiles === 'undefined') p.output.waitForTiles = quality === 'high' ? true : false;
+      if (typeof envPxr !== 'undefined') p.output.pixelRatio = Math.max(1, Math.min(4, Number(envPxr) || 1));
+      else if (quality !== 'high') { const cur = Number(p.output.pixelRatio); if (!cur || cur > 2) p.output.pixelRatio = 1; }
+      const cap = envMaxFps ? Number(envMaxFps) : (quality === 'high' ? undefined : 30);
+      if (cap && Number.isFinite(cap)) p.output.fps = Math.min(p.output.fps || cap, cap);
+      return p;
+    })(program);
+
+    res.json({ program });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// Augmentation pipeline: geocode, boundary, 3D flags; returns a new program copy
+async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapProgramType> {
+  const p = JSON.parse(JSON.stringify(prog)) as any;
+
+  // 3D fly-through triggers
+  const t = (text || '').toLowerCase();
+  const want3d = !!(p.flags?.google3dApiKey || p.extras?.flyThrough || t.includes('fly through') || t.includes('3d tile'));
+  if (want3d) {
+    p.flags = { ...(p.flags||{}), terrain: true, sky: true };
+    if (!p.flags.google3dApiKey && process.env.GOOGLE_TILE_API_KEY) p.flags.google3dApiKey = process.env.GOOGLE_TILE_API_KEY;
+    if (p.camera?.keyframes?.length) {
+      const last = p.camera.keyframes[p.camera.keyframes.length - 1];
+      if (typeof last.pitch !== 'number' || last.pitch < 50) last.pitch = 55;
+    }
+  }
+
+  // Address geocoding
+  if (p.extras?.address) {
+    try {
+      const data = await geocode(p.extras.address);
+      const lon = data.lon, lat = data.lat;
+      if (!p.camera) p.camera = { keyframes: [] };
+      if (!p.camera.keyframes?.length) {
+        p.camera.keyframes = [ { center: [0,30], zoom: 2.5, bearing: 0, pitch: 0, t: 0 }, { center: [lon,lat], zoom: 14, bearing: 0, pitch: 50, t: 3000 } ];
+      } else {
+        const last = p.camera.keyframes[p.camera.keyframes.length - 1];
+        last.center = [lon, lat];
+        if (typeof last.zoom !== 'number' || last.zoom < 13) last.zoom = 14;
+      }
+    } catch (e) { console.warn('[augment] geocode failed', e); }
+  }
+
+  // Boundary (city/area) via Overpass
+  if (p.extras?.boundaryName) {
+    try {
+      const gj = await fetchBoundaryGeoJSON(p.extras.boundaryName);
+      p.boundaryGeoJSON = gj;
+      p.boundaryFill = p.boundaryFill || '#ffcc00';
+      p.boundaryFillOpacity = (typeof p.boundaryFillOpacity === 'number') ? p.boundaryFillOpacity : 0.25;
+      p.boundaryLineColor = p.boundaryLineColor || '#ffcc00';
+      p.boundaryLineWidth = (typeof p.boundaryLineWidth === 'number') ? p.boundaryLineWidth : 2;
+      // do not auto-add phases here; add based on explicit prompt below
+    } catch (e) { console.warn('[augment] boundary fetch failed', e); }
+  }
+
+  // Phase selection based on explicit prompt intent
+  const phasesSet = new Set<string>();
+  const requested = Array.isArray(p.animation?.phases) ? p.animation.phases.map((s:string)=>s.toLowerCase()) : [];
+  // Always include zoom if we have keyframes
+  if (p.camera?.keyframes?.length) phasesSet.add('zoom');
+  const wantHighlight = requested.includes('highlight') || t.includes('highlight');
+  const wantTrace = requested.includes('trace') || t.includes('trace') || t.includes('outline');
+  if (wantHighlight) phasesSet.add('highlight');
+  if (wantTrace) phasesSet.add('trace');
+  if (requested.includes('wait')) phasesSet.add('wait');
+  if (requested.includes('hold')) phasesSet.add('hold');
+  // If user asked to highlight but not trace, keep only highlight
+  // If user asked to trace but not highlight, keep only trace
+  // If neither specified, default to just zoom (plus hold if provided)
+  const ordered = ['zoom','highlight','trace','wait','hold'].filter(x => phasesSet.has(x));
+  p.animation = { ...(p.animation||{}), phases: ordered.length ? ordered : ['zoom'] };
+
+  return p;
+}
+
 app.post("/api/templates", async (req, res) => {
   try {
     const body = req.body;
@@ -107,8 +312,28 @@ app.post("/api/animate", async (req: Request, res: Response) => {
     // 1) Natural language -> structured program (or validate provided program)
     let program: MapProgramType;
     if (incomingProgram) {
-      const parsed = (MapProgramSchema as any).safeParse?.(incomingProgram);
+      console.log("got incoming program")
+      function pruneNulls(obj: any): any {
+        if (obj === null || typeof obj === 'undefined') return undefined;
+        if (Array.isArray(obj)) return obj.map(pruneNulls).filter(v => v !== undefined);
+        if (typeof obj === 'object') {
+          const out: any = {};
+          for (const [k, v] of Object.entries(obj)) {
+            const pv = pruneNulls(v);
+            if (pv !== undefined) out[k] = pv;
+          }
+          return out;
+        }
+        return obj;
+      }
+      const sanitized = pruneNulls(incomingProgram);
+      // If border provided but missing isoA3, drop border to allow region-based flows
+      if (sanitized?.border && !sanitized.border.isoA3) {
+        delete sanitized.border;
+      }
+      const parsed = (MapProgramSchema as any).safeParse?.(sanitized);
       if (!parsed?.success) {
+        console.log("parse fail:", parsed?.error?.message,  parsed?.error )
         return res.status(400).json({ error: "Invalid 'program' payload", details: parsed?.error?.message ?? parsed?.error });
       }
       program = parsed.data;
@@ -116,6 +341,11 @@ app.post("/api/animate", async (req: Request, res: Response) => {
       if (!text) return res.status(400).json({ error: "Missing 'text'. Or provide a structured 'program'." });
       program = await nlToProgram(text);
     }
+
+    // Augment program based on extras/text (geocode, boundary, 3D)
+    program = await augmentProgram(program, text);
+
+
     // If an env-provided style URL is set (e.g., high-res satellite), use it when not specified by program
     // Resolve style: prefer provided URL; otherwise derive from remote style source env
     const isUrl = (s: string) => /^(https?:|data:)/i.test(s);
@@ -169,19 +399,6 @@ app.post("/api/animate", async (req: Request, res: Response) => {
       } catch (e) {
         console.warn("[style] error during key substitution", e);
         return styleUrl;
-      }
-    }
-
-    // Apply animation style defaults before rendering
-    program = applyAnimationStyle(program as any) as any;
-
-    // Heuristic: if user text hints to "trace the border", enable it
-    if (typeof text === 'string') {
-      const lowered = text.toLowerCase();
-      if (lowered.includes('trace') && lowered.includes('border')) {
-        try {
-          (program as any).border = { traceAfterZoom: true, ...(program as any).border };
-        } catch {}
       }
     }
 
@@ -297,6 +514,15 @@ app.post("/api/animate", async (req: Request, res: Response) => {
       }
     }
 
+    // Inject shared animation and map-core used by both preview and renderer
+    try {
+      const sharedAnim = path.join(__dirname, "..", "web", "src", "shared", "animation-core.js");
+      const sharedMap = path.join(__dirname, "..", "web", "src", "shared", "map-core.js");
+      await page.addScriptTag({ path: sharedAnim });
+      await page.addScriptTag({ path: sharedMap });
+      console.log('[renderer] injected shared animation-core and map-core');
+    } catch (e) { console.warn('[renderer] failed to inject shared animation core', e); }
+
     await injectScript(
       "maplibre-gl",
       "MAPLIBRE_JS_PATH",
@@ -309,6 +535,33 @@ app.post("/api/animate", async (req: Request, res: Response) => {
       "HUBBLE_JS_URL",
       "https://cdn.jsdelivr.net/npm/hubble.gl@1.4.0/dist.min.js"
     );
+    // Optional deck.gl and loaders for 3D tiles integration (inject only if requested to reduce overhead)
+    if ((program as any)?.flags?.google3dApiKey) {
+      await injectScript(
+        "deck.gl",
+        "DECK_GL_PATH",
+        "DECK_GL_URL",
+        "https://unpkg.com/deck.gl@9.0.0/dist.min.js"
+      );
+      await injectScript(
+        "loaders.gl core",
+        "LOADERS_CORE_PATH",
+        "LOADERS_CORE_URL",
+        "https://unpkg.com/@loaders.gl/core@4.0.0/dist/dist.min.js"
+      );
+      await injectScript(
+        "loaders.gl tiles",
+        "LOADERS_TILES_PATH",
+        "LOADERS_TILES_URL",
+        "https://unpkg.com/@loaders.gl/tiles@4.0.0/dist/dist.min.js"
+      );
+      await injectScript(
+        "loaders.gl 3d-tiles",
+        "LOADERS_3DTILES_PATH",
+        "LOADERS_3DTILES_URL",
+        "https://unpkg.com/@loaders.gl/3d-tiles@4.0.0/dist/dist.min.js"
+      );
+    }
 
     // 4) Bridge for the page to hand us the encoded bytes
     const buffers: Buffer[] = [];

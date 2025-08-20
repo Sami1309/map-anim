@@ -10,6 +10,16 @@ export async function parsePrompt(text: string) {
   return (await r.json()).program;
 }
 
+export async function resolveProgram(input: { text?: string; program?: unknown }) {
+  const r = await fetch(`${API}/api/resolve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.json()).program;
+}
+
 export async function renderProgram(program: unknown) {
   const r = await fetch(`${API}/api/animate`, {
     method: "POST",

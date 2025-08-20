@@ -107,3 +107,22 @@ BORDERS_GEOJSON_PATH=/absolute/path/to/ne_10m_admin_0_countries.geojson
 # Optionally, supply a self-hosted map style JSON
 MAP_STYLE_URL=https://your-host/style.json
 ```
+New features
+
+- Geocoding: GET `/api/geocode?q=<address>` (Nominatim). Env: `NOMINATIM_HOST`, `NOMINATIM_USER_AGENT`. Throttled to 1 req/sec.
+- OSM boundary: GET `/api/osm/boundary?name=<city_or_area>` (Overpass). Env: `OVERPASS_URL`.
+- Renderer flags (optional in program): `flags.terrain`, `flags.terrainExaggeration`, `flags.sky`, `flags.buildings`, `flags.google3dApiKey`, `flags.google3dOpacity`.
+- Boundary fill: provide `boundaryGeoJSON` in the program to render a translucent fill + outline in the final video.
+
+Frontend preview tips
+
+- To avoid MapTiler 403s in the browser, either fetch `http://<server>/style.json` as your MapLibre style, or fetch your style and replace `{key}` with `VITE_MAPTILER_KEY` before calling `new maplibregl.Map({ style: styleObj, ... })`.
+- Match preview aspect ratio to the final output `width:height`, and call `map.resize()` after sizing to ensure consistent zoom/framing.
+Program resolution for preview
+
+- POST `/api/resolve` with `{ text }` or `{ program }` to receive a fully-resolved program:
+  - Calls the LLM (if `text`) to produce a base program.
+  - Augments the program using your intent: geocodes `extras.address` (Nominatim), fetches `extras.boundaryName` (Overpass), adds a `highlight` phase, and enables 3D tiles if a fly-through is requested.
+  - Resolves `style` and injects `MAPTILER_KEY` to return a data URL style so the browser and server render identically.
+  - Applies performance toggles so preview timing and quality match the render.
+  - Use the returned `program` in the web preview, then POST the same program to `/api/animate` for exact fidelity.

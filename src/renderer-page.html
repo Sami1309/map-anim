@@ -119,6 +119,38 @@
       return { type: "FeatureCollection", features: matched };
     }
 
+    // --- Terrain, boundary fill, and deck overlay helpers ---
+    async function enableTerrain(map, exaggeration) {
+      try {
+        if (!map.getSource('terrain-src')) {
+          map.addSource('terrain-src', { type: 'raster-dem', url: 'https://demotiles.maplibre.org/terrain-tiles/tiles.json', tileSize: 256 });
+        }
+        map.setTerrain({ source: 'terrain-src', exaggeration: exaggeration || 1.2 });
+        if (!map.getLayer('sky')) {
+          map.addLayer({ id: 'sky', type: 'sky', paint: { 'sky-type': 'atmosphere', 'sky-atmosphere-sun-intensity': 10 } });
+        }
+      } catch (e) { console.warn('[renderer] enableTerrain failed', e?.message || e); }
+    }
+    async function addBoundaryFill(map, geojson, fill, fillOpacity, lineColor, lineWidth) {
+      try {
+        if (!map.getSource('boundary-src')) map.addSource('boundary-src', { type: 'geojson', data: geojson });
+        else map.getSource('boundary-src').setData(geojson);
+        if (!map.getLayer('boundary-fill')) {
+          map.addLayer({ id:'boundary-fill', type:'fill', source:'boundary-src', paint:{ 'fill-color': fill || '#ffcc00', 'fill-opacity': (typeof fillOpacity === 'number') ? fillOpacity : 0.25 } });
+        }
+        if (!map.getLayer('boundary-line')) {
+          map.addLayer({ id:'boundary-line', type:'line', source:'boundary-src', paint:{ 'line-color': lineColor || '#ffcc00', 'line-width': (typeof lineWidth === 'number') ? lineWidth : 2 } });
+        }
+      } catch (e) { console.warn('[renderer] addBoundaryFill failed', e?.message || e); }
+    }
+    async function addGoogle3DTiles(map, apiKey, opacity) {
+      try {
+        const overlay = new deck.MapboxOverlay({ interleaved: true, layers: [ new deck.Tile3DLayer({ id:'google-3d', data:`https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`, opacity: (typeof opacity === 'number') ? opacity : 1 }) ] });
+        map.addControl(overlay);
+        return overlay;
+      } catch (e) { console.warn('[renderer] deck.gl not available', e?.message || e); return null; }
+    }
+
     async function runZoomPhase(map, encoder, program, fps, duration, frameCount, ease) {
       for (let i = 0; i < frameCount; i++) {
         const p = i / Math.max(1, frameCount - 1);
@@ -266,8 +298,20 @@
       const highlight = filterBordersByISO3(borderData, ISO3);
       map.addSource("border_src", { type: "geojson", data: highlight });
 
-      // Build linework from polygons for crisp outlines and tracing using shared function
-      const borderLines = polygonToLines(highlight);
+      // Prefer program.boundaryGeoJSON for outlines/tracing if provided; otherwise use country highlight
+      let borderLines = null;
+      if (program.boundaryGeoJSON && program.boundaryGeoJSON.type) {
+        const gj = program.boundaryGeoJSON;
+        if (gj.type === 'FeatureCollection') {
+          // If already lines, use as-is; if polygons, convert to lines
+          const hasLine = (gj.features||[]).some(f => f.geometry?.type?.includes('Line'));
+          borderLines = hasLine ? gj : polygonToLines(gj);
+        } else {
+          borderLines = gj;
+        }
+      } else {
+        borderLines = polygonToLines(highlight);
+      }
       console.log(`[renderer] border polygons=${highlight.features.length}, lineFeatures=${borderLines.features.length}`);
       try {
         map.addSource("border_lines_src", { type: 'geojson', data: borderLines, lineMetrics: true });
@@ -280,7 +324,7 @@
         source: "border_lines_src",
         paint: {
           "line-color": getBorderColor(program),
-          "line-width": program.border.strokeWidth ?? 4,
+          "line-width": program.border?.strokeWidth ?? 4,
           // Start hidden; we will reveal after trace unless showDuringZoom is true
           "line-opacity": 0,
           "line-blur": 0
@@ -308,7 +352,7 @@
         source: 'border_lines_src',
         paint: {
           'line-color': getBorderColor(program),
-          'line-width': (program.border.strokeWidth ?? 4),
+          'line-width': (program.border?.strokeWidth ?? 4),
           'line-opacity': 0.0
         },
         layout: { 'line-join': 'round', 'line-cap': 'round' }
@@ -323,7 +367,7 @@
         source: 'border_lines_src',
         paint: {
           'line-color': getTraceColor(program),
-          'line-width': (program.border.strokeWidth ?? 4) + getTraceDelta(program),
+          'line-width': (program.border?.strokeWidth ?? 4) + getTraceDelta(program),
           'line-opacity': 0.0
         },
         layout: { 'line-join': 'round', 'line-cap': 'round' }
@@ -346,6 +390,21 @@
         } catch (e) { /* ignore */ }
       }
 
+      // Optional: boundary fill/outline if provided by server
+      if (program.boundaryGeoJSON) {
+        await addBoundaryFill(map, program.boundaryGeoJSON, program.boundaryFill, 0 /* start invisible for highlight phase */, program.boundaryLineColor, 0 /* start invisible */);
+      } else {
+        // If no boundaryGeoJSON but we have country highlight polygons, add a fill for them too (start invisible)
+        try {
+          if (!map.getSource('country-fill-src')) map.addSource('country-fill-src', { type: 'geojson', data: highlight });
+          if (!map.getLayer('country-fill')) map.addLayer({ id:'country-fill', type:'fill', source:'country-fill-src', paint:{ 'fill-color': program.boundaryFill || '#ffcc00', 'fill-opacity': 0 } });
+          if (!map.getLayer('country-outline')) map.addLayer({ id:'country-outline', type:'line', source:'country-fill-src', paint:{ 'line-color': program.boundaryLineColor || getBorderColor(program), 'line-width': program.boundaryLineWidth || 2, 'line-opacity': 0 } });
+        } catch (e) { console.warn('[renderer] add country fill failed', e?.message || e); }
+      }
+
+      // Optional: terrain/sky
+      if (program.flags?.terrain) await enableTerrain(map, program.flags?.terrainExaggeration || 1.2);
+
       // Warm up one render
       if (program.labels?.restrictToCountry && program.labels?.applyAt === 'always') {
         applyLabelRestriction();
@@ -359,6 +418,12 @@
         const keys = Object.keys(hub);
         throw new Error("Hubble.gl WebMEncoder not found. Exports: " + JSON.stringify(keys));
       }
+      // Optional: deck.gl overlay for Google Photorealistic 3D Tiles
+      let deckOverlay = null;
+      if (program.flags?.google3dApiKey) {
+        deckOverlay = await addGoogle3DTiles(map, program.flags.google3dApiKey, program.flags?.google3dOpacity ?? 1);
+      }
+
       const encoder = new WebMEncoder({ framerate: fps });
       await encoder.start();
       // Progress logging header
@@ -394,6 +459,28 @@
       for (const phase of phases) {
         console.log("current phase is", phase)
         if (phase === 'zoom') await runZoomPhase(map, encoder, program, fps, duration, frameCount, ease);
+        else if (phase === 'highlight') {
+          // Animate boundary fill/outline opacity up
+          const ms = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+          const frames = Math.ceil((ms / 1000) * fps);
+          const targetFill = (typeof program.boundaryFillOpacity === 'number') ? program.boundaryFillOpacity : 0.25;
+          const targetLine = 1;
+          for (let i = 0; i < frames; i++) {
+            const p = i / Math.max(1, frames - 1);
+            const v = EASING.easeOutCubic(p);
+            try {
+              if (program.boundaryGeoJSON) {
+                map.setPaintProperty('boundary-fill', 'fill-opacity', targetFill * v);
+                map.setPaintProperty('boundary-line', 'line-opacity', targetLine * v);
+              } else {
+                map.setPaintProperty('country-fill', 'fill-opacity', targetFill * v);
+                map.setPaintProperty('country-outline', 'line-opacity', targetLine * v);
+              }
+            } catch {}
+            await new Promise(res => requestAnimationFrame(res));
+            await encoder.add(map.getCanvas());
+          }
+        }
         else if (phase === 'wait') await runWaitPhase(map, encoder, Number(program.animation?.waitBeforeTraceMs || 0), fps);
         else if (phase === 'trace') await runTracePhase(map, encoder, program, fps);
         else if (phase === 'hold') await runHoldPhase(map, encoder, program, fps);
@@ -497,6 +584,7 @@
       const byteArray = Array.from(new Uint8Array(arrbuf));
       console.log('[progress] deliver-bytes-start size=' + byteArray.length);
       await window.__nodeDeliverWebM(byteArray);
+      try { deckOverlay?.finalize?.(); } catch {}
       console.log('[progress] deliver-bytes-done');
     };
   </script>

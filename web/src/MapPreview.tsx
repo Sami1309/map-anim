@@ -24,7 +24,11 @@ export default function MapPreview({
   // Calculate container styles based on aspect ratio
   const getContainerStyle = () => {
     const baseStyle: React.CSSProperties = { width: "100%", position: "relative" };
-    
+    // Prefer program aspect ratio to match final render framing
+    if (program?.output?.width && program?.output?.height) {
+      const pad = (program.output.height / program.output.width) * 100;
+      return { ...baseStyle, paddingBottom: `${pad}%` };
+    }
     if (aspectRatio === "16:9") {
       return { ...baseStyle, paddingBottom: "56.25%" }; // 9/16 * 100%
     } else if (aspectRatio === "9:16") {
@@ -81,21 +85,40 @@ export default function MapPreview({
     mapRef.current.setStyle(styleUrl);
   }, [program?.style]);
 
-  // setup border layers when program changes
+  // setup border layers and boundary fill when program changes
   useEffect(() => {
-    if (!program || !mapRef.current || !borderDataRef.current) return;
+    if (!program || !mapRef.current) return;
     
     const setupBorders = async () => {
       const map = mapRef.current!;
       try {
-        await setupBorderLayers(map, program, borderDataRef.current);
+        // Load country border data if missing, for ISO3 tracing fallback
+        if (!borderDataRef.current) {
+          const response = await fetch(BORDER_GEOJSON);
+          borderDataRef.current = await response.json();
+        }
+        const countryHighlight = await setupBorderLayers(map, program, borderDataRef.current);
+        // Add boundary fill/outline if boundaryGeoJSON is present (start invisible; highlight phase will fade in)
+        if (program.boundaryGeoJSON) {
+          if (!map.getSource('boundary-src')) map.addSource('boundary-src', { type: 'geojson', data: program.boundaryGeoJSON as any });
+          else (map.getSource('boundary-src') as any).setData(program.boundaryGeoJSON);
+          if (!map.getLayer('boundary-fill')) map.addLayer({ id: 'boundary-fill', type: 'fill', source: 'boundary-src', paint: { 'fill-color': program.boundaryFill || '#ffcc00', 'fill-opacity': 0 } });
+          if (!map.getLayer('boundary-line')) map.addLayer({ id: 'boundary-line', type: 'line', source: 'boundary-src', paint: { 'line-color': program.boundaryLineColor || '#ffcc00', 'line-width': program.boundaryLineWidth || 2, 'line-opacity': 0 } });
+        } else if (countryHighlight) {
+          try {
+            if (!map.getSource('country-fill-src')) map.addSource('country-fill-src', { type: 'geojson', data: countryHighlight as any });
+            else (map.getSource('country-fill-src') as any).setData(countryHighlight);
+            if (!map.getLayer('country-fill')) map.addLayer({ id:'country-fill', type:'fill', source:'country-fill-src', paint:{ 'fill-color': program.boundaryFill || '#ffcc00', 'fill-opacity': 0 } });
+            if (!map.getLayer('country-outline')) map.addLayer({ id:'country-outline', type:'line', source:'country-fill-src', paint:{ 'line-color': program.boundaryLineColor || '#ffcc00', 'line-width': program.boundaryLineWidth || 2, 'line-opacity': 0 } });
+          } catch (e) { console.warn('[web] add country fill failed', e); }
+        }
       } catch (e) {
         console.error("Failed to setup border layers:", e);
       }
     };
     
     setupBorders();
-  }, [program?.border.isoA3, program?.style]);
+  }, [program?.border?.isoA3, program?.style, JSON.stringify(program?.boundaryGeoJSON)]);
 
   // update border properties when they change
   useEffect(() => {
@@ -114,10 +137,26 @@ export default function MapPreview({
 
   // Full animation playback using shared functions
   const play = async () => {
-    if (!program || !mapRef.current) return;
+    if (!program || !mapRef.current || !borderDataRef.current) return;
     const map = mapRef.current;
     try {
       console.log("Starting animation sequence with program:", program);
+      
+      // Ensure border layers are set up before animation starts
+      console.log("Setting up border layers before animation...");
+      await setupBorderLayers(map, program, borderDataRef.current);
+      
+      // Small delay to ensure layers are ready
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Verify layers exist
+      const hasTraceLayers = map.getLayer('border_trace') && map.getLayer('border_drawn') && map.getLayer('border_line');
+      console.log("Border layers ready:", hasTraceLayers);
+      
+      if (!hasTraceLayers) {
+        console.warn("Border layers not ready, but proceeding with animation");
+      }
+      
       await runAnimationSequence(map, program);
     } catch (e) {
       console.error("Animation playback error:", e);
