@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./styles.css";
 import MapPreview from "./MapPreview";
 import { resolveProgram, renderProgram, saveTemplate } from "./api";
@@ -13,11 +13,13 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<"flexible" | "16:9" | "9:16">("flexible");
   const [selectedStyleUrl, setSelectedStyleUrl] = useState(MAP_STYLES[0].url);
+  const [previewStyleUrl, setPreviewStyleUrl] = useState(MAP_STYLES[0].url);
   const [mapSettings, setMapSettings] = useState(getDefaultMapSettings());
   const [animationSettings, setAnimationSettings] = useState(DEFAULT_ANIMATION_SETTINGS);
   const [renderProgress, setRenderProgress] = useState<string | null>(null);
   const [showCodeView, setShowCodeView] = useState(false);
   const [advancedEnabled, setAdvancedEnabled] = useState(false);
+  const [addressDetected, setAddressDetected] = useState(false);
   // New controls
   const [address, setAddress] = useState("");
   const [regionName, setRegionName] = useState("");
@@ -27,7 +29,16 @@ export default function App() {
   const [phaseWait, setPhaseWait] = useState(false);
   const [terrain, setTerrain] = useState(false);
   const [google3dEnabled, setGoogle3dEnabled] = useState(false);
-  const [google3dKey, setGoogle3dKey] = useState<string>(() => localStorage.getItem('GOOGLE_TILE_API_KEY') || "");
+  const [google3dKey, setGoogle3dKey] = useState<string>((import.meta as any).env?.VITE_GOOGLE_TILES_API_KEY || "");
+
+  // Detect address in prompt to surface a UI hint
+  function detectAddress(s: string): boolean {
+    const t = (s || '').toLowerCase();
+    return /(\d+\s+[^,]+\s+(st|ave|blvd|rd|road|street|avenue|drive|dr|ln|lane|ct|court|parkway|pkwy|way)\b)/i.test(t)
+      || /(\d{1,5}\s+\w+\s+\w+\.?)/.test(t)
+      || /(,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i.test(t);
+  }
+  useEffect(() => { setAddressDetected(detectAddress(prompt)); }, [prompt]);
 
 
   function buildOverrides() {
@@ -148,6 +159,15 @@ export default function App() {
 
   async function handleStyleChange(url: string) {
     setSelectedStyleUrl(url);
+    // 3D Tiles (Preview) is a virtual style that turns on the overlay
+    if (url === '3D_TILES_PREVIEW') {
+      setPreviewStyleUrl('https://demotiles.maplibre.org/style.json');
+      setGoogle3dEnabled(true);
+    } else {
+      setPreviewStyleUrl(url); // update preview immediately
+      // Only disable overlay when leaving the virtual 3D style
+      setGoogle3dEnabled(false);
+    }
     
     // Warn about MapTiler styles that are backend-only (direct API calls)
     if (url.includes('api.maptiler.com') && url.includes('{key}')) {
@@ -177,6 +197,9 @@ export default function App() {
         <h1>Map Animation Studio</h1>
         <label>Prompt</label>
         <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={6} />
+        <div style={{ fontSize: 12, color: addressDetected ? '#0a0' : '#666', marginTop: 4 }}>
+          {addressDetected ? 'Address detected in prompt' : 'No address detected'}
+        </div>
         <div className="row">
           <button onClick={onGenerate} disabled={busy}>
             {renderProgress && renderProgress.includes("Generating") ? "Generating..." : "Generate"}
@@ -235,7 +258,7 @@ export default function App() {
               <label className="checkbox"><input type="checkbox" checked={terrain} onChange={e => setTerrain(e.target.checked)} /> Terrain + Sky</label>
               <label className="checkbox"><input type="checkbox" checked={google3dEnabled} onChange={e => setGoogle3dEnabled(e.target.checked)} /> Google Photorealistic 3D Tiles</label>
               <label>Google Tile API Key</label>
-              <input value={google3dKey} onChange={e => { setGoogle3dKey(e.target.value); localStorage.setItem('GOOGLE_TILE_API_KEY', e.target.value); }} placeholder="AIza..." />
+              <input value={google3dKey} onChange={e => { setGoogle3dKey(e.target.value); }} placeholder="AIza..." />
             </div>
           </>
         )}
@@ -346,7 +369,14 @@ export default function App() {
       </div>
 
       <div className="right">
-        <MapPreview program={program} aspectRatio={aspectRatio} mapSettings={mapSettings} />
+        <MapPreview
+          program={program}
+          aspectRatio={aspectRatio}
+          mapSettings={mapSettings}
+          previewStyleUrl={previewStyleUrl}
+          google3dEnabled={google3dEnabled}
+          google3dKey={google3dKey}
+        />
       </div>
     </div>
   );

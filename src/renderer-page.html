@@ -431,10 +431,69 @@
       console.log(`[progress] start: frames=${frameCount}, fps=${fps}, waitForTiles=${program.output.waitForTiles}, pixelRatio=${effPixelRatio}`);
       const progressEvery = Math.max(30, Math.floor(frameCount / 10));
 
-      // Optional auto-fit for final keyframe framing
+      // If segments are present, run them in order (per-segment boundary + phases)
+      if (Array.isArray(program.segments) && program.segments.length) {
+        const encoder = new WebMEncoder({ framerate: fps });
+        await encoder.start();
+        for (const seg of program.segments) {
+          try {
+            // Update boundary fills and lines to this segment's geometry
+            const segFC = (seg.boundaryGeoJSON && seg.boundaryGeoJSON.type === 'FeatureCollection') ? seg.boundaryGeoJSON : null;
+            if (segFC) {
+              try {
+                if (map.getSource('boundary-src')) map.getSource('boundary-src').setData(segFC);
+                else map.addSource('boundary-src', { type: 'geojson', data: segFC });
+                // Convert polygons to lines for tracing
+                const hasLine = (segFC.features||[]).some(f => f.geometry?.type?.includes('Line'));
+                const borderLines = hasLine ? segFC : polygonToLines(segFC);
+                if (map.getSource('border_lines_src')) map.getSource('border_lines_src').setData(borderLines);
+                else map.addSource('border_lines_src', { type: 'geojson', data: borderLines, lineMetrics: true });
+              } catch (e) { console.warn('[renderer] segment boundary set failed', e?.message || e); }
+            }
+            // Reset visibilities
+            try {
+              if (map.getLayer('boundary-fill')) map.setPaintProperty('boundary-fill', 'fill-opacity', 0);
+              if (map.getLayer('boundary-line')) map.setPaintProperty('boundary-line', 'line-opacity', 0);
+              if (map.getLayer('country-fill')) map.setPaintProperty('country-fill', 'fill-opacity', 0);
+              if (map.getLayer('country-outline')) map.setPaintProperty('country-outline', 'line-opacity', 0);
+              if (map.getLayer('border_drawn')) map.setPaintProperty('border_drawn', 'line-opacity', 0);
+              if (map.getLayer('border_trace')) map.setPaintProperty('border_trace', 'line-opacity', 0);
+            } catch {}
+
+            // Phases + timing per segment
+            const segPhases = (seg.phases && seg.phases.length) ? seg.phases : (program.animation?.phases || ['zoom','highlight','trace','hold']);
+            const segDuration = seg.camera.keyframes.at(-1).t;
+            const segFrameCount = Math.ceil((segDuration / 1000) * fps);
+            const easeName2 = program.animation?.easing || 'easeOutCubic';
+            const ease2 = EASING[easeName2] || EASING.easeOutCubic;
+            // Run phases
+            for (const phase of segPhases) {
+              if (phase === 'zoom') await runZoomPhase(map, { ...program, ...seg }, fps, segDuration, segFrameCount, ease2, encoder);
+              else if (phase === 'highlight') await runHighlightPhase(map, { ...program, ...seg }, fps, encoder);
+              else if (phase === 'wait') await runWaitPhase(map, Number(program.animation?.waitBeforeTraceMs || 0), fps, encoder);
+              else if (phase === 'trace') await runTracePhase(map, { ...program, ...seg }, fps, encoder);
+              else if (phase === 'hold') await runHoldPhase(map, { ...program, ...seg }, fps, encoder);
+            }
+          } catch (e) { console.error('[renderer] segment run failed', e?.message || e); }
+        }
+        // Save & deliver
+        const blob = await encoder.save();
+        const arrbuf = await blob.arrayBuffer();
+        const byteArray = Array.from(new Uint8Array(arrbuf));
+        await window.__nodeDeliverWebM(byteArray);
+        try { deckOverlay?.finalize?.(); } catch {}
+        return;
+      }
+
+      // Optional auto-fit for final keyframe framing (prefer boundaryGeoJSON if provided)
       try {
         if (program.animation?.fitFinalToBorder) {
-          const geom = highlight.features[0]?.geometry;
+          let geom = null;
+          if (program.boundaryGeoJSON && program.boundaryGeoJSON.type === 'FeatureCollection' && program.boundaryGeoJSON.features?.length) {
+            geom = program.boundaryGeoJSON.features[0].geometry;
+          } else if (highlight.features?.length) {
+            geom = highlight.features[0].geometry;
+          }
           if (geom) {
             const coords = (geom.type === 'Polygon') ? geom.coordinates.flat(1) : geom.coordinates.flat(2);
             const lons = coords.map(c => c[0]);

@@ -21,6 +21,7 @@ export type MapProgram = {
     google3dOpacity?: number;
   };
   boundaryGeoJSON?: any;
+  boundaryGeoJSONs?: any[];
   boundaryFill?: string;
   boundaryFillOpacity?: number;
   boundaryLineColor?: string;
@@ -32,5 +33,15 @@ export type MapProgram = {
     easing?: string;
     fastMode?: boolean;
     traceFrameSkip?: number;
+    fitFinalToBorder?: boolean;  // Set to true to enable boundary fitting (disabled by default)
+    fitPaddingPx?: number;
   };
+  extras?: { boundaryName?: string; address?: string; boundaryAdminLevel?: string; flyThrough?: boolean };
+  segments?: Array<{
+    camera: { keyframes: CameraKeyframe[] };
+    border?: { isoA3?: string; strokeWidth?: number; opacity?: number };
+    extras?: { boundaryName?: string; address?: string };
+    boundaryGeoJSON?: any;
+    phases?: Array<'zoom'|'highlight'|'trace'|'hold'|'wait'>;
+  }>;
 };

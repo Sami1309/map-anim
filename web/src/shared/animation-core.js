@@ -81,6 +81,13 @@ export async function runTracePhase(map, program, fps, encoder) {
   const showDuringZoom = !!(program.border?.showDuringZoom);
   const borderOpacity = program.border?.opacity ?? 1;
 
+  // Ensure region fill is visible during trace (default)
+  try {
+    const targetFill = (typeof program.boundaryFillOpacity === 'number') ? program.boundaryFillOpacity : 0.25;
+    if (map.getLayer('boundary-fill')) map.setPaintProperty('boundary-fill', 'fill-opacity', targetFill);
+    if (map.getLayer('country-fill')) map.setPaintProperty('country-fill', 'fill-opacity', targetFill);
+  } catch {}
+
   if (!showDuringZoom) {
     try { map.setPaintProperty('border_line', 'line-opacity', 0); } catch {}
     try { map.setPaintProperty('border_drawn', 'line-opacity', 0); } catch {}
@@ -179,4 +186,3 @@ try {
     };
   }
 } catch {}
-

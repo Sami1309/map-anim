@@ -109,6 +109,27 @@ app.get("/api/geocode", async (req: Request, res: Response) => {
   }
 });
 
+// --- Nominatim boundary polygon (preferred for fill/outline); throttle too
+const boundaryThrottle = pThrottle({ limit: 1, interval: 1000 });
+async function fetchNominatimBoundaryGeoJSON(name: string) {
+  const url = new URL("/search", NOM_HOST);
+  url.searchParams.set("q", name);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("polygon_geojson", "1");
+  url.searchParams.set("polygon_threshold", "0.0");
+  const r = await fetch(url.toString(), { headers: { "User-Agent": NOM_UA, "Referer": "https://render.com" } as any });
+  if (!r.ok) throw new Error(`nominatim_${r.status}`);
+  const arr = (await r.json()) as any[];
+  if (!arr.length) throw new Error("not_found");
+  const first = arr[0];
+  const gj = first?.geojson;
+  if (!gj) throw new Error("no_geojson");
+  const feature = { type: "Feature", properties: { name: first?.display_name }, geometry: gj };
+  return { type: "FeatureCollection", features: [feature] };
+}
+const fetchNominatimBoundary = boundaryThrottle(fetchNominatimBoundaryGeoJSON);
+
 // --- Overpass boundary endpoint (simple city/area relation lookup)
 const OVERPASS = process.env.OVERPASS_URL || "https://overpass-api.de/api/interpreter";
 async function fetchBoundaryGeoJSON(name: string) {
@@ -135,7 +156,13 @@ app.get("/api/osm/boundary", async (req: Request, res: Response) => {
   try {
     const name = String(req.query.name || "");
     if (!name) return res.status(400).json({ error: "missing name" });
-    const gj = await fetchBoundaryGeoJSON(name);
+    let gj;
+    try {
+      gj = await fetchNominatimBoundary(name);
+    } catch (e) {
+      console.warn('[boundary] nominatim failed; falling back to overpass', (e as any)?.message || e);
+      gj = await fetchBoundaryGeoJSON(name);
+    }
     res.json(gj);
   } catch (e: any) {
     res.status(502).json({ error: e?.message || String(e) });
@@ -214,6 +241,7 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
       return p;
     })(program);
 
+    console.log("program is", program.camera.keyframes)
     res.json({ program });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || String(e) });
@@ -237,32 +265,128 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
   }
 
   // Address geocoding
-  if (p.extras?.address) {
+  const looksLikeAddress = (s: string) => {
+    const t = (s || '').toLowerCase();
+    // Enhanced patterns for better address detection
+    return /(\d+\s+[^,]+\s+(st|ave|blvd|rd|road|street|avenue|drive|dr|ln|lane|ct|court|parkway|pkwy|way|circle|cir|place|pl|plaza)\b)/i.test(t)
+      || /(\d{1,5}\s+\w+.*?(street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd))/i.test(t)
+      || /(,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i.test(t)
+      || /(\d+\s+[A-Za-z\s]+,\s*[A-Za-z\s]+)/i.test(t) // "123 Main Street, New York"
+      || /([A-Za-z\s]+\d+[A-Za-z\s]*,\s*[A-Za-z\s]+)/i.test(t); // "Main Street 123, New York"
+  };
+
+  const extractAddressFromText = (s: string): string | null => {
+    if (!s) return null;
+    // Try to extract the most complete address-looking string
+    const patterns = [
+      /(\d+\s+[^,\n]+\s+(st|ave|blvd|rd|road|street|avenue|drive|dr|ln|lane|ct|court|parkway|pkwy|way|circle|cir|place|pl|plaza)[^,\n]*(?:,\s*[^,\n]+)*)/i,
+      /(\d{1,5}\s+[A-Za-z\s]+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd)[^,\n]*(?:,\s*[^,\n]+)*)/i,
+      /(\d+\s+[A-Za-z\s]+,\s*[A-Za-z\s,]+)/i
+    ];
+    
+    for (const pattern of patterns) {
+      const match = s.match(pattern);
+      if (match) return match[1].trim();
+    }
+    return null;
+  };
+  if (p.extras?.address || (text && looksLikeAddress(text))) {
     try {
-      const data = await geocode(p.extras.address);
-      const lon = data.lon, lat = data.lat;
-      if (!p.camera) p.camera = { keyframes: [] };
-      if (!p.camera.keyframes?.length) {
-        p.camera.keyframes = [ { center: [0,30], zoom: 2.5, bearing: 0, pitch: 0, t: 0 }, { center: [lon,lat], zoom: 14, bearing: 0, pitch: 50, t: 3000 } ];
-      } else {
-        const last = p.camera.keyframes[p.camera.keyframes.length - 1];
-        last.center = [lon, lat];
-        if (typeof last.zoom !== 'number' || last.zoom < 13) last.zoom = 14;
+        console.log("extracting address")
+      // Prefer the LLM-extracted address, fallback to extracting from text
+      let addr = p.extras?.address;
+      if (!addr && text) {
+        addr = extractAddressFromText(text) || text;
       }
-    } catch (e) { console.warn('[augment] geocode failed', e); }
+      
+      if (addr) {
+        console.log(`[augment] geocoding address: "${addr}"`);
+        const data = await geocode(addr);
+        const lon = data.lon, lat = data.lat;
+        
+        // Validate coordinates are reasonable (not null/undefined/out of bounds)
+        if (typeof lon !== 'number' || typeof lat !== 'number' || 
+            isNaN(lon) || isNaN(lat) || 
+            Math.abs(lon) > 180 || Math.abs(lat) > 90) {
+          console.error(`[augment] Invalid coordinates from geocoder: lat=${lat}, lon=${lon}`);
+          throw new Error('Invalid coordinates from geocoder');
+        }
+        
+        console.log(`[augment] geocoded to: lat=${lat}, lon=${lon}`);
+        console.log(`[augment] setting camera center to: [${lon}, ${lat}] (lon, lat order)`);
+        console.log(`[augment] coordinate validation: lon range [-180,180]: ${lon}, lat range [-90,90]: ${lat}`);
+        
+        if (!p.camera) p.camera = { keyframes: [] };
+        if (!p.camera.keyframes?.length) {
+          // Create a nice zoom-in animation to the address
+          // Start from a regional view, then zoom to street level
+          p.camera.keyframes = [ 
+            { center: [lon, lat], zoom: 8, bearing: 0, pitch: 0, t: 0 }, 
+            { center: [lon, lat], zoom: 12, bearing: 0, pitch: 20, t: 2000 },
+            { center: [lon, lat], zoom: 17, bearing: 0, pitch: 50, t: 4000 } 
+          ];
+        } else {
+          // Update the final keyframe to center on the address
+          const last = p.camera.keyframes[p.camera.keyframes.length - 1];
+          last.center = [lon, lat];
+          if (typeof last.zoom !== 'number' || last.zoom < 15) last.zoom = 17;
+          // Ensure we have some pitch for street-level viewing
+          if (typeof last.pitch !== 'number' || last.pitch < 30) last.pitch = 50;
+        }
+        
+        // Set the address in extras for future reference
+        if (!p.extras) p.extras = {};
+        p.extras.address = addr;
+        console.log(p.camera.keyframes[1])
+      }
+    } catch (e) { 
+      console.warn('[augment] geocode failed', e); 
+    }
   }
 
   // Boundary (city/area) via Overpass
   if (p.extras?.boundaryName) {
     try {
-      const gj = await fetchBoundaryGeoJSON(p.extras.boundaryName);
+      let gj;
+      try {
+        gj = await fetchNominatimBoundary(p.extras.boundaryName);
+      } catch (e) {
+        console.warn('[augment] nominatim boundary failed; using overpass', (e as any)?.message || e);
+        gj = await fetchBoundaryGeoJSON(p.extras.boundaryName);
+      }
       p.boundaryGeoJSON = gj;
       p.boundaryFill = p.boundaryFill || '#ffcc00';
       p.boundaryFillOpacity = (typeof p.boundaryFillOpacity === 'number') ? p.boundaryFillOpacity : 0.25;
       p.boundaryLineColor = p.boundaryLineColor || '#ffcc00';
       p.boundaryLineWidth = (typeof p.boundaryLineWidth === 'number') ? p.boundaryLineWidth : 2;
+      // Keep default animation settings (boundary fitting disabled by default to preserve coordinates)
+      p.animation = { ...(p.animation || {}), fitPaddingPx: (p.animation?.fitPaddingPx ?? 80) };
       // do not auto-add phases here; add based on explicit prompt below
     } catch (e) { console.warn('[augment] boundary fetch failed', e); }
+  }
+
+  // If segments exist, resolve their boundaries and stack default phases
+  if (Array.isArray(p.segments) && p.segments.length) {
+    const tLower = (text || '').toLowerCase();
+    const wantHighlight = tLower.includes('highlight');
+    const wantTrace = tLower.includes('trace');
+    const boundaryList: any[] = [];
+    for (const seg of p.segments) {
+      try {
+        const name = seg?.extras?.boundaryName;
+        if (name) {
+          try { seg.boundaryGeoJSON = await fetchNominatimBoundary(name); } catch (e) { seg.boundaryGeoJSON = await fetchBoundaryGeoJSON(name); }
+          if (seg.boundaryGeoJSON) boundaryList.push(seg.boundaryGeoJSON);
+        }
+      } catch (e) { console.warn('[augment] segment boundary fetch failed', e); }
+      // phases stacking default
+      let phases = Array.isArray(seg.phases) ? [...seg.phases] : ['zoom'];
+      if (wantHighlight && !phases.includes('highlight')) phases.push('highlight');
+      if (wantTrace && !phases.includes('trace')) phases.push('trace');
+      if (!phases.includes('hold')) phases.push('hold');
+      seg.phases = phases;
+    }
+    if (boundaryList.length) (p as any).boundaryGeoJSONs = boundaryList;
   }
 
   // Phase selection based on explicit prompt intent
@@ -282,6 +406,78 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
   const ordered = ['zoom','highlight','trace','wait','hold'].filter(x => phasesSet.has(x));
   p.animation = { ...(p.animation||{}), phases: ordered.length ? ordered : ['zoom'] };
 
+  // Multi-zoom detection: "zoom into X ... then zoom into Y"
+  try {
+    const targets: string[] = [];
+    const re = /zoom\s+(?:into|to)\s+([^,.;]+?)(?=(?:,|\.|;|\band\s+then\b|\bthen\b|$))/gi;
+    let m: RegExpExecArray | null;
+    const inText = (text || '');
+    while ((m = re.exec(inText)) !== null) {
+      const name = (m[1] || '').trim();
+      if (name) targets.push(name);
+    }
+    if (targets.length >= 2) {
+      // Geocode first two targets and build segments with hold between
+      const pts = await Promise.all([geocode(targets[0]), geocode(targets[1])]);
+      const dur = 4000; const hold = 1000;
+      const startZoom = 6; const endZoom = 8.5;
+      const segs: any[] = [];
+      // Segment 1
+      segs.push({
+        camera: { keyframes: [
+          { center: [pts[0].lon, pts[0].lat], zoom: startZoom, bearing: 0, pitch: 0, t: 0 },
+          { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur }
+        ]},
+        extras: { boundaryName: targets[0] },
+        phases: ['zoom']
+      });
+      // Segment 2
+      segs.push({
+        camera: { keyframes: [
+          { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: 0 },
+          { center: [pts[1].lon, pts[1].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur }
+        ]},
+        extras: { boundaryName: targets[1] },
+        phases: ['zoom']
+      });
+
+      // If user asked to highlight/trace, include them in segment phases
+      const tLower = (text || '').toLowerCase();
+      const wantHighlight = tLower.includes('highlight');
+      const wantTrace = tLower.includes('trace');
+      segs.forEach((s) => {
+        // Insert highlight/trace after zoom
+        if (wantHighlight && !s.phases.includes('highlight')) s.phases.push('highlight');
+        if (wantTrace && !s.phases.includes('trace')) s.phases.push('trace');
+        // Always hold at end of each segment by default
+        if (!s.phases.includes('hold')) s.phases.push('hold');
+      });
+
+      // Fetch boundaries for segments
+      for (const s of segs) {
+        try {
+          const gj = await fetchNominatimBoundary(s.extras.boundaryName);
+          s.boundaryGeoJSON = gj;
+        } catch (e) {
+          try { s.boundaryGeoJSON = await fetchBoundaryGeoJSON(s.extras.boundaryName); } catch {}
+        }
+      }
+      p.segments = segs;
+      // Also set top-level camera as a concatenation for systems that ignore segments
+      p.camera = { keyframes: [
+        { center: [pts[0].lon, pts[0].lat], zoom: startZoom, bearing: 0, pitch: 0, t: 0 },
+        { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur },
+        { center: [pts[1].lon, pts[1].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur + hold + dur }
+      ]};
+      if (!p.animation?.phases || p.animation.phases.length <= 1) {
+        p.animation = { ...(p.animation || {}), phases: ['zoom','hold','zoom'] };
+      }
+    }
+  } catch (e) {
+    console.warn('[augment] multi-zoom detection failed', (e as any)?.message || e);
+  }
+
+  console.log("new is", p.camera.keyframes[1])
   return p;
 }
 

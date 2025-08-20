@@ -119,6 +119,8 @@ export const MapProgram = z.object({
     .optional(),
   /** Optional pre-fetched boundary GeoJSON to fill/outline in renderer */
   boundaryGeoJSON: z.any().optional(),
+  /** Optional list of boundaries (for multi-region animations) */
+  boundaryGeoJSONs: z.array(z.any()).optional(),
   /** Optional boundary styling for highlight phase */
   boundaryFill: z.string().optional(),
   boundaryFillOpacity: z.number().min(0).max(1).optional(),
@@ -142,7 +144,16 @@ export const MapProgram = z.object({
       boundaryAdminLevel: z.string().optional(),
       flyThrough: z.boolean().optional()
     })
-    .optional()
+    .optional(),
+  /** Multi-segment support: per-segment camera + boundary + phases */
+  segments: z.array(z.object({
+    camera: z.object({ keyframes: z.array(CameraKeyframe).min(1) }),
+    border: BorderHighlight.optional(),
+    extras: z.object({ boundaryName: z.string().optional(), address: z.string().optional() }).optional(),
+    boundaryGeoJSON: z.any().optional(),
+    phases: z.array(z.enum(["zoom","highlight","trace","hold","wait"]))
+      .optional()
+  })).optional()
 });
 
 export type MapProgram = z.infer<typeof MapProgram>;

@@ -41,6 +41,11 @@ export const MAP_STYLES: MapStyle[] = [
     name: "MapTiler Satellite", 
     url: "https://api.maptiler.com/maps/satellite/style.json?key={key}",
     description: "Satellite imagery - backend rendering only"
+  },
+  {
+    name: "3D Tiles (Preview)",
+    url: "3D_TILES_PREVIEW",
+    description: "Preview Google Photorealistic 3D Tiles in-app"
   }
 ];
 
