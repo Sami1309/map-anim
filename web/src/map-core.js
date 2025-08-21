@@ -6,7 +6,22 @@ import { polygonToLines, filterBordersByISO3 } from './shared/map-core.js';
 // Setup border layers on map
 export async function setupBorderLayers(map, program, borderData) {
   const ISO3 = (program.border?.isoA3 || '').toString().toUpperCase();
-  const highlight = filterBordersByISO3(borderData, ISO3);
+  
+  // For segment-based programs that don't have ISO3 but have boundaryGeoJSON,
+  // don't use global border data (which would match all countries with empty ISO3)
+  let highlight;
+  if (!ISO3 && program.boundaryGeoJSON) {
+    // Use the specific boundary data for this segment, not global borders
+    highlight = program.boundaryGeoJSON;
+    console.log(`[map-core] Using segment-specific boundary data instead of global borders`);
+  } else if (ISO3) {
+    // Normal ISO3-based filtering
+    highlight = filterBordersByISO3(borderData, ISO3);
+  } else {
+    // No boundary data available, create empty collection
+    highlight = { type: 'FeatureCollection', features: [] };
+    console.log(`[map-core] No boundary data available, using empty collection`);
+  }
   
   // Wait for style to be loaded before adding sources/layers
   if (!map.isStyleLoaded()) {

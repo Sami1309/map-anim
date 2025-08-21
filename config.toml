@@ -1,0 +1,6 @@
+[profiles.gpt-5]
+model = "gpt-5"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "high"
+model_reasoning_summary = "detailed"

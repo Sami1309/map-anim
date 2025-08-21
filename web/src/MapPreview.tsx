@@ -342,9 +342,14 @@ export default function MapPreview({
     try {
       console.log("Starting animation sequence with program:", program);
 
-      // Ensure border layers are set up before animation starts
-      console.log("Setting up border layers before animation...");
-      await setupBorderLayers(map, program, borderDataRef.current);
+      // For multi-segment animations, we'll set up border layers per segment
+      // For single animations, set up border layers for the main program
+      if (!Array.isArray(program.segments) || program.segments.length === 0) {
+        console.log("Setting up border layers for single animation...");
+        await setupBorderLayers(map, program, borderDataRef.current);
+      } else {
+        console.log("Skipping global border setup for multi-segment animation (will be set per segment)");
+      }
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -423,30 +428,25 @@ export default function MapPreview({
 
       if (Array.isArray(program.segments) && program.segments.length) {
         for (const seg of program.segments) {
-          // Set boundary sources for THIS segment only (just before running its animation)
+          console.log(`[web] Starting segment: ${seg.extras?.boundaryName || 'unknown'}`);
+          
+          // Create a segment program with only this segment's boundary data
+          const segmentProgram = { 
+            ...program, 
+            ...seg,
+            // Only include this segment's boundary, not all boundaries
+            boundaryGeoJSON: seg.boundaryGeoJSON || null,
+            boundaryGeoJSONs: seg.boundaryGeoJSON ? [seg.boundaryGeoJSON] : null
+          };
+
+          // Set up border layers specifically for THIS segment
           try {
-            const segFC =
-              seg.boundaryGeoJSON && (seg.boundaryGeoJSON as any).type === "FeatureCollection"
-                ? seg.boundaryGeoJSON
-                : null;
-            if (segFC) {
-              console.log(`[web] Setting boundary for segment: ${seg.extras?.boundaryName || 'unknown'}`);
-              if (map.getSource("boundary-src")) (map.getSource("boundary-src") as any).setData(segFC);
-              else map.addSource("boundary-src", { type: "geojson", data: segFC });
-              const hasLine = (segFC.features || []).some((f: any) => f.geometry?.type?.includes("Line"));
-              const borderLines = hasLine
-                ? segFC
-                : (await import("./map-core.js")).polygonToLines(segFC as any);
-              if (map.getSource("border_lines_src"))
-                (map.getSource("border_lines_src") as any).setData(borderLines as any);
-              else map.addSource("border_lines_src", {
-                type: "geojson",
-                data: borderLines as any,
-                lineMetrics: true
-              });
+            if (seg.boundaryGeoJSON) {
+              console.log(`[web] Setting up border layers for segment: ${seg.extras?.boundaryName || 'unknown'}`);
+              await setupBorderLayers(map, segmentProgram, borderDataRef.current);
             }
           } catch (e) {
-            console.warn("[web] segment boundary set failed", (e as any)?.message || e);
+            console.warn("[web] segment border setup failed", (e as any)?.message || e);
           }
 
           // Reset all boundary visuals before starting this segment
@@ -459,8 +459,8 @@ export default function MapPreview({
             if (map.getLayer("border_trace")) map.setPaintProperty("border_trace", "line-opacity", 0);
           } catch {}
 
-          // Run animation for this segment (uses the boundary we just set)
-          await runAnimationSequence(map, { ...program, ...seg } as any);
+          // Run animation for this segment with its specific boundary data
+          await runAnimationSequence(map, segmentProgram);
         }
       } else {
         await runAnimationSequence(map, program);

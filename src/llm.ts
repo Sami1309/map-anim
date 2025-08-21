@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { MapProgram, MapProgram as MapProgramSchema } from "./program-schema.js";
+import { generateStyleContextMessages } from "./animation-styles.js";
 
 // Guidance text included in the system prompt to align LLM output to MapProgramSchema
 const SCHEMA_GUIDE = `
@@ -123,8 +124,12 @@ export async function nlToProgram(natural: string): Promise<MapProgram> {
     baseURL: process.env.OPENAI_BASE_URL || undefined
   });
 
+  // Generate contextual animation style examples based on keywords in the prompt
+  const styleContextMessages = generateStyleContextMessages(natural);
+  
   const messages: any[] = [
     { role: "system", content: SYSTEM },
+    ...styleContextMessages, // Inject contextual examples for detected keywords
     ...FEW_SHOTS.flatMap(s => [
       { role: "user", content: s.user },
       { role: "assistant", content: JSON.stringify(s.json) }
@@ -262,7 +267,7 @@ export async function nlToProgram(natural: string): Promise<MapProgram> {
   };
 
   try {
-    const model = process.env.OPENAI_MODEL || "gpt-5";
+    const model = process.env.OPENAI_MODEL || "gpt-4.1";
     console.log("querying openai now")
     const resp = await client.chat.completions.create({
       model,

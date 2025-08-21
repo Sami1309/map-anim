@@ -88,3 +88,162 @@ export function applyAnimationStyle(program: MapProgram): MapProgram {
   }
   return merged;
 }
+
+// Context injection for specialized animation patterns
+export interface AnimationStyleExample {
+  keywords: string[];
+  description: string;
+  example: any;
+}
+
+const ANIMATION_CONTEXT_EXAMPLES: AnimationStyleExample[] = [
+  {
+    keywords: ['swirl', 'spiral', 'circular', 'rotate', 'spinning', 'twirl'],
+    description: 'A swirling zoom animation that rotates the camera while zooming in',
+    example: {
+      camera: {
+        keyframes: [
+          {
+            center: [-122.4102, 37.7908],
+            zoom: 8.5,
+            bearing: 0,
+            pitch: 25,
+            t: 0
+          },
+          {
+            center: [-122.4102, 37.7908],
+            zoom: 11.5,
+            bearing: 120,
+            pitch: 40,
+            t: 2000
+          },
+          {
+            center: [-122.4102, 37.7908],
+            zoom: 13.5,
+            bearing: 240,
+            pitch: 50,
+            t: 4000
+          },
+          {
+            center: [-122.4097472, 37.7898345],
+            zoom: 17,
+            bearing: 360,
+            pitch: 50,
+            t: 6000
+          }
+        ]
+      },
+      animation: { phases: ["zoom", "hold"], easing: "easeInOutCubic" },
+      output: { width: 1920, height: 1080, fps: 30, format: "webm" }
+    }
+  },
+  {
+    keywords: ['fly through', 'flythrough', '3d', 'aerial', 'bird view', "bird's eye"],
+    description: 'A cinematic fly-through animation with 3D terrain and buildings',
+    example: {
+      camera: {
+        keyframes: [
+          {
+            center: [-122.4194, 37.7749],
+            zoom: 8,
+            bearing: 0,
+            pitch: 0,
+            t: 0
+          },
+          {
+            center: [-122.4194, 37.7749],
+            zoom: 12,
+            bearing: 45,
+            pitch: 60,
+            t: 3000
+          },
+          {
+            center: [-122.4097472, 37.7898345],
+            zoom: 16,
+            bearing: 90,
+            pitch: 70,
+            t: 6000
+          }
+        ]
+      },
+      flags: { terrain: true, sky: true, buildings: true, terrainExaggeration: 1.5 },
+      animation: { phases: ["zoom", "hold"], easing: "easeOutCubic" },
+      output: { width: 1920, height: 1080, fps: 30, format: "webm" }
+    }
+  },
+  {
+    keywords: ['cinematic', 'dramatic', 'movie', 'film'],
+    description: 'A cinematic zoom with dramatic camera movements',
+    example: {
+      camera: {
+        keyframes: [
+          {
+            center: [-122.4194, 37.7749],
+            zoom: 6,
+            bearing: 0,
+            pitch: 0,
+            t: 0
+          },
+          {
+            center: [-122.4150, 37.7800],
+            zoom: 10,
+            bearing: 30,
+            pitch: 45,
+            t: 2500
+          },
+          {
+            center: [-122.4097472, 37.7898345],
+            zoom: 15,
+            bearing: 0,
+            pitch: 60,
+            t: 5000
+          }
+        ]
+      },
+      animation: { phases: ["zoom", "hold"], easing: "easeInOutCubic" },
+      output: { width: 1920, height: 1080, fps: 60, format: "webm", pixelRatio: 2 }
+    }
+  }
+];
+
+/**
+ * Analyzes a user prompt and returns relevant animation style examples to inject into LLM context
+ */
+export function getAnimationStyleContext(prompt: string): AnimationStyleExample[] {
+  const lowerPrompt = prompt.toLowerCase();
+  const matchedStyles: AnimationStyleExample[] = [];
+
+  for (const style of ANIMATION_CONTEXT_EXAMPLES) {
+    const hasKeyword = style.keywords.some(keyword => 
+      lowerPrompt.includes(keyword.toLowerCase())
+    );
+    
+    if (hasKeyword) {
+      matchedStyles.push(style);
+    }
+  }
+
+  return matchedStyles;
+}
+
+/**
+ * Generates additional context messages for the LLM based on detected animation styles
+ */
+export function generateStyleContextMessages(prompt: string): Array<{role: string, content: string}> {
+  const matchedStyles = getAnimationStyleContext(prompt);
+  
+  if (matchedStyles.length === 0) {
+    return [];
+  }
+
+  const contextMessages = [];
+  
+  for (const style of matchedStyles) {
+    contextMessages.push({
+      role: 'system',
+      content: `User prompt contains "${style.keywords.join(', ')}" keywords. ${style.description}. Example structure: ${JSON.stringify(style.example, null, 2)}`
+    });
+  }
+
+  return contextMessages;
+}
