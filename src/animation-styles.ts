@@ -7,7 +7,11 @@ export type AnimationStyleId =
   | "fast_preview";
 
 type PartialDeep<T> = {
-  [K in keyof T]?: T[K] extends object ? PartialDeep<T[K]> : T[K];
+  // Make properties optional, and if the property is an object (ignoring undefined),
+  // recursively make its fields optional as well. This allows partial defaults like `border`.
+  [K in keyof T]?: NonNullable<T[K]> extends object
+    ? PartialDeep<NonNullable<T[K]>>
+    : T[K];
 };
 
 type StyleDef = {
@@ -79,7 +83,7 @@ export function applyAnimationStyle(program: MapProgram): MapProgram {
   const thicknessId = (program.border as any)?.styleId as string | undefined;
   if (!hasExplicitStroke && thicknessId) {
     const map: Record<string, number> = { thin: 2, medium: 4, thick: 6, bold: 8, ultra: 12 };
-    const sw = map[thicknessId] ?? merged.border.strokeWidth;
+    const sw = map[thicknessId] ?? merged.border?.strokeWidth ?? 4;
     (merged.border as any).strokeWidth = sw;
   }
   return merged;

@@ -84,7 +84,7 @@ export const MapProgram = z.object({
      * Which border(s) to highlight.
      * (Extend later to multiple or admin-1)
      */
-    border: BorderHighlight,
+    border: BorderHighlight.optional(),
     /**
      * Map style URL (default to MapLibre demo style if omitted).
      */
@@ -98,5 +98,46 @@ export const MapProgram = z.object({
     /**
      * How to encode the output
      */
-    output: OutputSpec
+    output: OutputSpec,
+    /** Optional augmentation flags for renderer features (terrain, deck.gl, etc.) */
+    // Keep permissive to avoid breaking existing clients; validation can be refined later.
+    flags: z
+        .object({
+        terrain: z.boolean().optional(),
+        terrainExaggeration: z.number().min(0.1).max(10).optional(),
+        sky: z.boolean().optional(),
+        buildings: z.boolean().optional(),
+        google3dApiKey: z.string().optional(),
+        google3dOpacity: z.number().min(0).max(1).optional()
+    })
+        .optional(),
+    /** Optional pre-fetched boundary GeoJSON to fill/outline in renderer */
+    boundaryGeoJSON: z.any().optional(),
+    /** Optional list of boundaries (for multi-region animations) */
+    boundaryGeoJSONs: z.array(z.any()).optional(),
+    /** Optional boundary styling for highlight phase */
+    boundaryFill: z.string().optional(),
+    boundaryFillOpacity: z.number().min(0).max(1).optional(),
+    boundaryLineColor: z.string().optional(),
+    boundaryLineWidth: z.number().min(0).max(20).optional(),
+    /** Optional animation plan */
+    // Deprecated duplicate; kept single source of truth in AnimationSpec above.
+    /** Optional extras suggested by NL parsing */
+    extras: z
+        .object({
+        address: z.string().optional(),
+        boundaryName: z.string().optional(),
+        boundaryAdminLevel: z.string().optional(),
+        flyThrough: z.boolean().optional()
+    })
+        .optional(),
+    /** Multi-segment support: per-segment camera + boundary + phases */
+    segments: z.array(z.object({
+        camera: z.object({ keyframes: z.array(CameraKeyframe).min(1) }),
+        border: BorderHighlight.optional(),
+        extras: z.object({ boundaryName: z.string().optional(), address: z.string().optional() }).optional(),
+        boundaryGeoJSON: z.any().optional(),
+        phases: z.array(z.enum(["zoom", "highlight", "trace", "hold", "wait"]))
+            .optional()
+    })).optional()
 });

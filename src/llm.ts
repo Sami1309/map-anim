@@ -77,6 +77,42 @@ const FEW_SHOTS = [
       animation: { phases: ["zoom", "hold"] },
       output: { width: 1920, height: 1080, fps: 30, format: "webm" }
     }
+  },
+  {
+    user: "Zoom into Spain, trace its border, then zoom out to Europe",
+    json: {
+      camera: {
+        keyframes: [
+          { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 0 },
+          { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 4000 },
+          { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 8000 }
+        ]
+      },
+      segments: [
+        {
+          camera: {
+            keyframes: [
+              { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 0 },
+              { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 4000 }
+            ]
+          },
+          extras: { boundaryName: "Spain" },
+          phases: ["zoom", "trace", "hold"]
+        },
+        {
+          camera: {
+            keyframes: [
+              { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 0 },
+              { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 4000 }
+            ]
+          },
+          extras: { boundaryName: "Europe" },
+          phases: ["zoom", "hold"]
+        }
+      ],
+      animation: { phases: ["zoom", "trace", "hold", "zoom", "hold"] },
+      output: { width: 1920, height: 1080, fps: 30, format: "webm" }
+    }
   }
 ];
 
@@ -226,7 +262,7 @@ export async function nlToProgram(natural: string): Promise<MapProgram> {
   };
 
   try {
-    const model = process.env.OPENAI_MODEL || "gpt-4.1";
+    const model = process.env.OPENAI_MODEL || "gpt-5";
     console.log("querying openai now")
     const resp = await client.chat.completions.create({
       model,
@@ -266,6 +302,7 @@ export async function nlToProgram(natural: string): Promise<MapProgram> {
     const code = e?.code || e?.response?.data?.error?.code;
     const detail = e?.response?.data?.error?.message || e?.message || String(e);
     console.log(detail)
+
     throw new Error(`OpenAI request failed${status ? ` (status ${status})` : ""}${code ? ` [${code}]` : ""}: ${detail}`);
   }
 }

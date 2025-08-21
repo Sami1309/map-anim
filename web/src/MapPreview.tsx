@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import type { MapProgram } from "./types";
-import { runAnimationSequence } from "./animation-core.js";
+import { runAnimationSequencePreview as runAnimationSequence } from "./shared/animation-core.js";
 import { setupBorderLayers, updateBorderProperties, cleanupBorderLayers } from "./map-core.js";
 import { applyMapSettings } from "./map-settings.js";
 
@@ -423,12 +423,14 @@ export default function MapPreview({
 
       if (Array.isArray(program.segments) && program.segments.length) {
         for (const seg of program.segments) {
+          // Set boundary sources for THIS segment only (just before running its animation)
           try {
             const segFC =
               seg.boundaryGeoJSON && (seg.boundaryGeoJSON as any).type === "FeatureCollection"
                 ? seg.boundaryGeoJSON
                 : null;
             if (segFC) {
+              console.log(`[web] Setting boundary for segment: ${seg.extras?.boundaryName || 'unknown'}`);
               if (map.getSource("boundary-src")) (map.getSource("boundary-src") as any).setData(segFC);
               else map.addSource("boundary-src", { type: "geojson", data: segFC });
               const hasLine = (segFC.features || []).some((f: any) => f.geometry?.type?.includes("Line"));
@@ -447,6 +449,7 @@ export default function MapPreview({
             console.warn("[web] segment boundary set failed", (e as any)?.message || e);
           }
 
+          // Reset all boundary visuals before starting this segment
           try {
             if (map.getLayer("boundary-fill")) map.setPaintProperty("boundary-fill", "fill-opacity", 0);
             if (map.getLayer("boundary-line")) map.setPaintProperty("boundary-line", "line-opacity", 0);
@@ -456,6 +459,7 @@ export default function MapPreview({
             if (map.getLayer("border_trace")) map.setPaintProperty("border_trace", "line-opacity", 0);
           } catch {}
 
+          // Run animation for this segment (uses the boundary we just set)
           await runAnimationSequence(map, { ...program, ...seg } as any);
         }
       } else {

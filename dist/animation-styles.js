@@ -58,7 +58,7 @@ export function applyAnimationStyle(program) {
     const thicknessId = program.border?.styleId;
     if (!hasExplicitStroke && thicknessId) {
         const map = { thin: 2, medium: 4, thick: 6, bold: 8, ultra: 12 };
-        const sw = map[thicknessId] ?? merged.border.strokeWidth;
+        const sw = map[thicknessId] ?? merged.border?.strokeWidth ?? 4;
         merged.border.strokeWidth = sw;
     }
     return merged;

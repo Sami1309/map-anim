@@ -68,7 +68,7 @@ export const AnimationSpec = z.object({
   /** easing function for camera motion */
   easing: z.enum(["linear", "easeOutCubic", "easeInOutCubic", "easeOutQuad"]).default("easeOutCubic").optional(),
   /** ordered phase list to run */
-  phases: z.array(z.enum(["zoom","wait","trace","hold"]))
+  phases: z.array(z.enum(["zoom","wait","trace","hold", "highlight"]))
     .default(["zoom","trace","hold"]).optional(),
   /** milliseconds to wait between zoom and trace phases */
   waitBeforeTraceMs: z.number().min(0).max(60000).default(0).optional(),
@@ -127,15 +127,7 @@ export const MapProgram = z.object({
   boundaryLineColor: z.string().optional(),
   boundaryLineWidth: z.number().min(0).max(20).optional(),
   /** Optional animation plan */
-  animation: z
-    .object({
-      phases: z.array(z.enum(["zoom", "highlight", "trace", "hold", "wait"]))
-        .optional(),
-      waitBeforeTraceMs: z.number().nonnegative().optional(),
-      fitFinalToBorder: z.boolean().optional(),
-      fitPaddingPx: z.number().nonnegative().optional()
-    })
-    .optional(),
+  // Deprecated duplicate; kept single source of truth in AnimationSpec above.
   /** Optional extras suggested by NL parsing */
   extras: z
     .object({
