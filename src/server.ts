@@ -38,6 +38,53 @@ app.use(
 
 app.get("/healthz", (_: Request, res: Response) => res.send("ok"));
 
+// Serve browser player and shared helpers for in-browser rendering
+// - /player/map-anim-player.js -> compiled player bundle (dist/player.js)
+// - /player/shared/* -> reuse shared animation helpers used by web preview
+{
+  const distDir = path.join(__dirname);
+  app.get("/player/map-anim-player.js", async (_req: Request, res: Response) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    console.log("retrieving anim player")
+    try {
+      const fs = await import("node:fs/promises");
+      const pathJsDist = path.join(distDir, "player.js"); // built output
+      const pathTsSrc = path.join(__dirname, "player.ts"); // dev source
+
+      // Prefer built JS
+      try {
+        const js = await fs.readFile(pathJsDist, "utf8");
+        return res.send(js);
+      } catch {}
+
+      // Dev fallback: transpile TS on the fly
+      try {
+        const tsCode = await fs.readFile(pathTsSrc, "utf8");
+        let jsCode = tsCode;
+        try {
+          const ts = await import("typescript");
+          const out = (ts as any).transpileModule(tsCode, { compilerOptions: { module: 99 /* ESNext */, target: 7 /* ES2020 */, sourceMap: false } });
+          jsCode = out.outputText || tsCode;
+        } catch {}
+        return res.send(jsCode);
+      } catch (e2: any) {
+        return res.status(404).send(`// player not available. Build with npm run build.\n// ${e2?.message || e2}`);
+      }
+    } catch (e: any) {
+      return res.status(500).send(`// player route error\n// ${e?.message || e}`);
+    }
+  });
+  const sharedDir = path.join(__dirname, "..", "web", "src", "shared");
+  app.use("/player/shared", (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    next();
+  }, express.static(sharedDir));
+}
+
 // Serve a patched style.json with MAPTILER_KEY injected for frontend preview usage
 app.get("/style.json", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
