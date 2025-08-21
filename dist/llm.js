@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { MapProgram as MapProgramSchema } from "./program-schema.js";
+import { generateStyleContextMessages } from "./animation-styles.js";
 // Guidance text included in the system prompt to align LLM output to MapProgramSchema
 const SCHEMA_GUIDE = `
 Produce strict JSON matching this structure (no extra fields):
@@ -74,6 +75,42 @@ const FEW_SHOTS = [
             animation: { phases: ["zoom", "hold"] },
             output: { width: 1920, height: 1080, fps: 30, format: "webm" }
         }
+    },
+    {
+        user: "Zoom into Spain, trace its border, then zoom out to Europe",
+        json: {
+            camera: {
+                keyframes: [
+                    { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 0 },
+                    { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 4000 },
+                    { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 8000 }
+                ]
+            },
+            segments: [
+                {
+                    camera: {
+                        keyframes: [
+                            { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 0 },
+                            { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 4000 }
+                        ]
+                    },
+                    extras: { boundaryName: "Spain" },
+                    phases: ["zoom", "trace", "hold"]
+                },
+                {
+                    camera: {
+                        keyframes: [
+                            { center: [-3.7, 40.4], zoom: 5.5, bearing: 0, pitch: 40, t: 0 },
+                            { center: [10, 50], zoom: 2.5, bearing: 0, pitch: 0, t: 4000 }
+                        ]
+                    },
+                    extras: { boundaryName: "Europe" },
+                    phases: ["zoom", "hold"]
+                }
+            ],
+            animation: { phases: ["zoom", "trace", "hold", "zoom", "hold"] },
+            output: { width: 1920, height: 1080, fps: 30, format: "webm" }
+        }
     }
 ];
 export async function nlToProgram(natural) {
@@ -82,8 +119,11 @@ export async function nlToProgram(natural) {
         apiKey: process.env.OPENAI_API_KEY,
         baseURL: process.env.OPENAI_BASE_URL || undefined
     });
+    // Generate contextual animation style examples based on keywords in the prompt
+    const styleContextMessages = generateStyleContextMessages(natural);
     const messages = [
         { role: "system", content: SYSTEM },
+        ...styleContextMessages, // Inject contextual examples for detected keywords
         ...FEW_SHOTS.flatMap(s => [
             { role: "user", content: s.user },
             { role: "assistant", content: JSON.stringify(s.json) }

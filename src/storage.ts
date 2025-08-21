@@ -23,6 +23,22 @@ export async function putVideoWebm(buffer: Buffer): Promise<string> {
   return `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 }
 
+export async function putVideoMp4(buffer: Buffer): Promise<string> {
+  const bucket = process.env.AWS_S3_BUCKET!;
+  const key = `map-anim/${randomUUID()}.mp4`;
+  const upload = new Upload({
+    client: s3,
+    params: {
+      Bucket: bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: "video/mp4"
+    }
+  });
+  await upload.done();
+  return `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+}
+
 export async function putJsonTemplate(name: string, program: unknown): Promise<string> {
   const bucket = process.env.AWS_S3_BUCKET!;
   const key = `map-anim/templates/${name}-${randomUUID()}.json`;

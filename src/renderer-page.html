@@ -259,6 +259,8 @@
 
       // Resize container so MapLibre canvas uses exact output size
       const mapDiv = document.getElementById("map");
+      // Reset container for pooled pages
+      mapDiv.innerHTML = "";
       mapDiv.style.width = width + "px";
       mapDiv.style.height = height + "px";
 
@@ -411,21 +413,40 @@
       }
       await new Promise(res => map.once("idle", res));
 
-      // Hubble.gl: create WebM encoder (handle different global/casing)
-      const hub = window.hubble || window.Hubble || window.hubblegl || window.HubbleGL || {};
-      const WebMEncoder = hub.WebMEncoder || hub.WebmEncoder;
-      if (typeof WebMEncoder !== 'function') {
-        const keys = Object.keys(hub);
-        throw new Error("Hubble.gl WebMEncoder not found. Exports: " + JSON.stringify(keys));
+      // Encoder selection: raw RGBA frames -> Node (ffmpeg) if provided, else fallback to Hubble WebM
+      const useRgbaPath = typeof window.__nodeDeliverFrameRGBA === 'function';
+      let encoder;
+      if (useRgbaPath) {
+        const canvas = map.getCanvas();
+        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        if (!gl) throw new Error('WebGL context required for RGBA readback');
+        const capW = canvas.width | 0;
+        const capH = canvas.height | 0;
+        const buf = new Uint8Array(capW * capH * 4);
+        encoder = {
+          async start() {},
+          async add() {
+            gl.readPixels(0, 0, capW, capH, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+            await window.__nodeDeliverFrameRGBA(buf);
+          },
+          async save() { return null; }
+        };
+        await encoder.start();
+      } else {
+        const hub = window.hubble || window.Hubble || window.hubblegl || window.HubbleGL || {};
+        const WebMEncoder = hub.WebMEncoder || hub.WebmEncoder;
+        if (typeof WebMEncoder !== 'function') {
+          const keys = Object.keys(hub);
+          throw new Error('Hubble.gl WebMEncoder not found. Exports: ' + JSON.stringify(keys));
+        }
+        encoder = new WebMEncoder({ framerate: fps });
+        await encoder.start();
       }
       // Optional: deck.gl overlay for Google Photorealistic 3D Tiles
       let deckOverlay = null;
       if (program.flags?.google3dApiKey) {
         deckOverlay = await addGoogle3DTiles(map, program.flags.google3dApiKey, program.flags?.google3dOpacity ?? 1);
       }
-
-      const encoder = new WebMEncoder({ framerate: fps });
-      await encoder.start();
       // Progress logging header
       const effPixelRatio = Math.max(1, Math.min(4, Number(program.output.pixelRatio) || 2));
       console.log(`[progress] start: frames=${frameCount}, fps=${fps}, waitForTiles=${program.output.waitForTiles}, pixelRatio=${effPixelRatio}`);
@@ -433,8 +454,6 @@
 
       // If segments are present, run them in order (per-segment boundary + phases)
       if (Array.isArray(program.segments) && program.segments.length) {
-        const encoder = new WebMEncoder({ framerate: fps });
-        await encoder.start();
         for (const seg of program.segments) {
           try {
             // Update boundary fills and lines to this segment's geometry
@@ -477,10 +496,14 @@
           } catch (e) { console.error('[renderer] segment run failed', e?.message || e); }
         }
         // Save & deliver
-        const blob = await encoder.save();
-        const arrbuf = await blob.arrayBuffer();
-        const byteArray = Array.from(new Uint8Array(arrbuf));
-        await window.__nodeDeliverWebM(byteArray);
+        if (typeof window.__nodeDeliverFrameRGBA === 'function') {
+          if (typeof window.__nodeDeliverEnd === 'function') await window.__nodeDeliverEnd();
+        } else {
+          const blob = await encoder.save();
+          const arrbuf = await blob.arrayBuffer();
+          const byteArray = Array.from(new Uint8Array(arrbuf));
+          await window.__nodeDeliverWebM(byteArray);
+        }
         try { deckOverlay?.finalize?.(); } catch {}
         return;
       }
@@ -635,14 +658,18 @@
     //     }
     //   }
 
-      console.log('[progress] encode-save-start');
-      const blob = await encoder.save(); // Blob (video/webm)
-      console.log('[progress] encode-save-done bytes=' + (blob?.size ?? 'unknown'));
-      const arrbuf = await blob.arrayBuffer();
-      // Puppeteer binding is safer with plain arrays vs typed arrays.
-      const byteArray = Array.from(new Uint8Array(arrbuf));
-      console.log('[progress] deliver-bytes-start size=' + byteArray.length);
-      await window.__nodeDeliverWebM(byteArray);
+      if (typeof window.__nodeDeliverFrameRGBA === 'function') {
+        if (typeof window.__nodeDeliverEnd === 'function') await window.__nodeDeliverEnd();
+      } else {
+        console.log('[progress] encode-save-start');
+        const blob = await encoder.save(); // Blob (video/webm)
+        console.log('[progress] encode-save-done bytes=' + (blob?.size ?? 'unknown'));
+        const arrbuf = await blob.arrayBuffer();
+        // Puppeteer binding is safer with plain arrays vs typed arrays.
+        const byteArray = Array.from(new Uint8Array(arrbuf));
+        console.log('[progress] deliver-bytes-start size=' + byteArray.length);
+        await window.__nodeDeliverWebM(byteArray);
+      }
       try { deckOverlay?.finalize?.(); } catch {}
       console.log('[progress] deliver-bytes-done');
     };

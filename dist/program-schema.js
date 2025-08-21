@@ -63,7 +63,7 @@ export const AnimationSpec = z.object({
     /** easing function for camera motion */
     easing: z.enum(["linear", "easeOutCubic", "easeInOutCubic", "easeOutQuad"]).default("easeOutCubic").optional(),
     /** ordered phase list to run */
-    phases: z.array(z.enum(["zoom", "wait", "trace", "hold"]))
+    phases: z.array(z.enum(["zoom", "wait", "trace", "hold", "highlight"]))
         .default(["zoom", "trace", "hold"]).optional(),
     /** milliseconds to wait between zoom and trace phases */
     waitBeforeTraceMs: z.number().min(0).max(60000).default(0).optional(),

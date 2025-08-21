@@ -7,12 +7,15 @@ import { nlToProgram } from "./llm.js";
 import { MapProgram as MapProgramSchema } from "./program-schema.js";
 import fetch from "node-fetch";
 import * as topojson from "topojson-client";
-import { putVideoWebm, putJsonTemplate } from "./storage.js";
+import { putVideoWebm, putJsonTemplate, putVideoMp4 } from "./storage.js";
+import { BrowserPool } from "./browser-pool.js";
+import { spawnFfmpegNvenc } from "./ffmpeg-pipeline.js";
 import pThrottle from "p-throttle";
 import cors from "cors";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+const pool = new BrowserPool(Number(process.env.BROWSER_POOL_SIZE || 2));
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 app.use(cors({ origin: corsOrigin }));
 // Serve local MapLibre styles from the repo's styles folder
@@ -60,6 +63,186 @@ app.get("/style.json", async (_req, res) => {
     catch (e) {
         console.error("/style.json error", e);
         return res.status(500).json({ error: e?.message || String(e) });
+    }
+});
+/**
+ * POST /api/render
+ * Streams MP4 over HTTP using NVENC/libx264.
+ * body: { text?: string, program?: MapProgram }
+ */
+app.post("/api/render", async (req, res) => {
+    let lease;
+    let ffmpeg;
+    try {
+        const text = req.body?.text;
+        const incomingProgram = req.body?.program;
+        let program;
+        if (incomingProgram) {
+            const parsed = MapProgramSchema.safeParse?.(incomingProgram);
+            if (!parsed?.success)
+                return res.status(400).json({ error: "Invalid 'program' payload", details: parsed?.error?.message ?? parsed?.error });
+            program = parsed.data;
+        }
+        else if (text) {
+            program = await nlToProgram(text);
+        }
+        else {
+            return res.status(400).json({ error: "Provide 'text' or 'program'" });
+        }
+        program = await augmentProgram(program, text);
+        // Style resolution and MapTiler substitution (same as animate)
+        const isUrl = (s) => /^(https?:|data:)/i.test(s);
+        function resolveRemoteStyle() {
+            const remote = process.env.MAP_STYLE_REMOTE || "https://github.com/openmaptiles/dark-matter-gl-style";
+            if (!remote)
+                return undefined;
+            if (/\.json(\?|#|$)/i.test(remote))
+                return remote;
+            const m = remote.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)(?:\/|$)/i);
+            if (m) {
+                const org = m[1];
+                const repo = m[2];
+                const branch = process.env.MAP_STYLE_REMOTE_BRANCH || "master";
+                const pathInRepo = process.env.MAP_STYLE_REMOTE_PATH || "style.json";
+                return `https://raw.githubusercontent.com/${org}/${repo}/${branch}/${pathInRepo}`;
+            }
+            return remote;
+        }
+        if (!program.style)
+            program.style = resolveRemoteStyle();
+        async function withMaptilerKey(styleUrl) {
+            if (!styleUrl)
+                return styleUrl;
+            const key = process.env.MAPTILER_KEY;
+            if (!key)
+                return styleUrl;
+            try {
+                const r = await fetch(styleUrl);
+                if (!r.ok)
+                    return styleUrl;
+                let txt = await r.text();
+                txt = txt.replace(/\{key\}/g, key).replace(/%7Bkey%7D/gi, encodeURIComponent(key)).replace(/\$\{key\}/g, key);
+                return "data:application/json;charset=utf-8;base64," + Buffer.from(txt, "utf8").toString("base64");
+            }
+            catch {
+                return styleUrl;
+            }
+        }
+        program.style = await withMaptilerKey(program.style);
+        // Performance toggles
+        function applyPerformanceToggles(p) {
+            const quality = (process.env.RENDER_QUALITY || "fast").toLowerCase();
+            const envWait = process.env.RENDER_WAIT_FOR_TILES;
+            const envPxr = process.env.RENDER_PIXEL_RATIO;
+            const envMaxFps = process.env.RENDER_MAX_FPS;
+            if (!p.output)
+                p.output = {};
+            if (typeof envWait !== "undefined")
+                p.output.waitForTiles = /^(1|true|yes)$/i.test(String(envWait));
+            else if (typeof p.output.waitForTiles === "undefined")
+                p.output.waitForTiles = quality === "high";
+            if (typeof envPxr !== "undefined")
+                p.output.pixelRatio = Math.max(1, Math.min(4, Number(envPxr) || 1));
+            else {
+                const cur = Number(p.output.pixelRatio);
+                if (!cur || cur > 2)
+                    p.output.pixelRatio = 1;
+            }
+            const cap = envMaxFps ? Number(envMaxFps) : (quality === "high" ? undefined : 30);
+            if (cap && Number.isFinite(cap))
+                p.output.fps = Math.min(p.output.fps || cap, cap);
+            return p;
+        }
+        program = applyPerformanceToggles(program);
+        const cssW = program.output.width;
+        const cssH = program.output.height;
+        const fps = program.output.fps || 30;
+        const pxr = Math.max(1, Math.min(4, Number(program.output.pixelRatio) || 1));
+        const capW = (cssW * pxr) | 0;
+        const capH = (cssH * pxr) | 0;
+        lease = await pool.lease();
+        const page = lease.page;
+        // Borders provider
+        const fs = await import("node:fs/promises");
+        await page.exposeFunction("__nodeGetBordersGeoJSON", async () => {
+            const localPath = process.env.BORDERS_GEOJSON_PATH;
+            const remoteUrl = process.env.BORDERS_GEOJSON_URL || "https://unpkg.com/world-atlas@2.0.2/countries-10m.json";
+            try {
+                if (localPath) {
+                    const txt = await fs.readFile(localPath, "utf8");
+                    return JSON.parse(txt);
+                }
+            }
+            catch (e) {
+                console.warn("[renderer] failed reading local borders file", localPath, e);
+            }
+            const r = await fetch(remoteUrl);
+            if (!r.ok)
+                throw new Error(`Failed to fetch borders: ${r.status}`);
+            const data = await r.json();
+            if (data && data.type === "Topology") {
+                try {
+                    const geo = topojson.feature(data, data.objects.countries);
+                    return geo;
+                }
+                catch {
+                    return data;
+                }
+            }
+            return data;
+        });
+        // ffmpeg pipeline streaming to HTTP
+        ffmpeg = spawnFfmpegNvenc({ width: capW, height: capH, fps, format: "mp4", encoder: process.env.RENDER_ENCODER || "h264_nvenc" });
+        res.setHeader("Content-Type", "video/mp4");
+        res.setHeader("X-Encoder", ffmpeg.encoderName);
+        ffmpeg.proc.stdout.pipe(res);
+        ffmpeg.proc.stderr.on("data", (d) => process.env.DEBUG_FFMPEG && console.error("[ffmpeg]", d.toString()));
+        await page.exposeFunction("__nodeDeliverFrameRGBA", async (payload) => {
+            function toBuffer(u8) {
+                if (!u8)
+                    throw new Error("empty_payload");
+                if (typeof ArrayBuffer !== "undefined" && u8 instanceof ArrayBuffer)
+                    return Buffer.from(new Uint8Array(u8));
+                if (u8?.buffer instanceof ArrayBuffer && typeof u8.byteLength === "number")
+                    return Buffer.from(new Uint8Array(u8.buffer, u8.byteOffset ?? 0, u8.byteLength));
+                if (Array.isArray(u8?.data))
+                    return Buffer.from(u8.data);
+                if (Array.isArray(u8))
+                    return Buffer.from(u8);
+                if (typeof u8 === "object" && typeof u8.length === "number")
+                    return Buffer.from(Array.from(u8));
+                throw new Error("unsupported_payload_type:" + (typeof u8));
+            }
+            const buf = toBuffer(payload);
+            if (!ffmpeg)
+                throw new Error("ffmpeg not initialized");
+            if (!ffmpeg.proc.stdin.write(buf)) {
+                await new Promise((resolve) => ffmpeg.proc.stdin.once("drain", () => resolve()));
+            }
+            return true;
+        });
+        await page.exposeFunction("__nodeDeliverEnd", async () => {
+            try {
+                ffmpeg?.proc.stdin.end();
+            }
+            catch { }
+            return true;
+        });
+        await page.setViewport({ width: cssW, height: cssH, deviceScaleFactor: 1 });
+        await page.evaluate((p) => window.startRender(p), program);
+        // finalize stream
+        await new Promise((resolve) => ffmpeg?.proc.on("close", () => resolve()));
+    }
+    catch (e) {
+        console.error("[/api/render] error", e);
+        if (!res.headersSent)
+            res.status(500).json({ error: e?.message || "render_failed" });
+    }
+    finally {
+        try {
+            lease?.release();
+        }
+        catch { }
     }
 });
 app.post("/api/llm/parse", async (req, res) => {
@@ -692,6 +875,17 @@ app.post("/api/animate", async (req, res) => {
         }
         program = applyOutputCaps(program);
         program.style = await withMaptilerKey(program.style);
+        // Capture dimensions and encoder preference
+        const cssW = program.output.width;
+        const cssH = program.output.height;
+        const fps = program.output.fps || 30;
+        const pxr = Math.max(1, Math.min(4, Number(program.output.pixelRatio) || 1));
+        const capW = (cssW * pxr) | 0;
+        const capH = (cssH * pxr) | 0;
+        const wantMp4 = String(req.body?.format || "").toLowerCase() === "mp4" ||
+            String(req.body?.encoder || "").toLowerCase() === "h264_nvenc" ||
+            /^(1|true|yes)$/i.test(String(req.body?.useNvenc || "")) ||
+            /^(1|true|yes)$/i.test(String(process.env.RENDER_FORCE_MP4 || ""));
         // 2) Launch headless Chrome (try multiple WebGL-friendly flag sets)
         const { browser, name, info } = await launchBrowserWithWebGL();
         console.log("WebGL initialized via", name, info);
@@ -777,41 +971,26 @@ app.post("/api/animate", async (req, res) => {
             await injectScript("loaders.gl tiles", "LOADERS_TILES_PATH", "LOADERS_TILES_URL", "https://unpkg.com/@loaders.gl/tiles@4.0.0/dist/dist.min.js");
             await injectScript("loaders.gl 3d-tiles", "LOADERS_3DTILES_PATH", "LOADERS_3DTILES_URL", "https://unpkg.com/@loaders.gl/3d-tiles@4.0.0/dist/dist.min.js");
         }
-        // 4) Bridge for the page to hand us the encoded bytes
+        // 4) Bridge for the page to hand us encoded bytes (WebM) or raw RGBA frames for ffmpeg (MP4)
         const buffers = [];
         let totalBytes = 0;
         let deliverCalls = 0;
-        // Normalize assorted payload shapes from the page into a Node Buffer
+        const mp4Chunks = [];
+        let ffmpeg;
         function toBuffer(u8) {
-            try {
-                if (!u8)
-                    throw new Error("empty_payload");
-                // ArrayBuffer
-                if (typeof ArrayBuffer !== "undefined" && u8 instanceof ArrayBuffer) {
-                    return Buffer.from(new Uint8Array(u8));
-                }
-                // TypedArray view
-                if (u8?.buffer instanceof ArrayBuffer && typeof u8.byteLength === "number") {
-                    return Buffer.from(new Uint8Array(u8.buffer, u8.byteOffset ?? 0, u8.byteLength));
-                }
-                // Node Buffer-like {type:'Buffer', data:[..]} or {data:[..]}
-                if (Array.isArray(u8?.data)) {
-                    return Buffer.from(u8.data);
-                }
-                // Plain array of numbers
-                if (Array.isArray(u8)) {
-                    return Buffer.from(u8);
-                }
-                // Array-like object with length and numeric indices
-                if (typeof u8 === "object" && typeof u8.length === "number") {
-                    return Buffer.from(Array.from(u8));
-                }
-                throw new Error("unsupported_payload_type:" + (typeof u8));
-            }
-            catch (err) {
-                console.error("[nodeDeliverWebM] payload error", err);
-                throw err;
-            }
+            if (!u8)
+                throw new Error("empty_payload");
+            if (typeof ArrayBuffer !== "undefined" && u8 instanceof ArrayBuffer)
+                return Buffer.from(new Uint8Array(u8));
+            if (u8?.buffer instanceof ArrayBuffer && typeof u8.byteLength === "number")
+                return Buffer.from(new Uint8Array(u8.buffer, u8.byteOffset ?? 0, u8.byteLength));
+            if (Array.isArray(u8?.data))
+                return Buffer.from(u8.data);
+            if (Array.isArray(u8))
+                return Buffer.from(u8);
+            if (typeof u8 === "object" && typeof u8.length === "number")
+                return Buffer.from(Array.from(u8));
+            throw new Error("unsupported_payload_type:" + (typeof u8));
         }
         // Provide borders GeoJSON via Node (local file or world-atlas TopoJSON -> GeoJSON)
         await page.exposeFunction("__nodeGetBordersGeoJSON", async () => {
@@ -845,14 +1024,39 @@ app.post("/api/animate", async (req, res) => {
             }
             return data; // assume GeoJSON FeatureCollection
         });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await page.exposeFunction("__nodeDeliverWebM", async (payload) => {
-            const buf = toBuffer(payload);
-            buffers.push(buf);
-            totalBytes += buf.length;
-            deliverCalls += 1;
-            console.log(`[server] received webm payload: call=${deliverCalls}, bytes=${buf.length}, total=${totalBytes}`);
-        });
+        if (wantMp4) {
+            ffmpeg = spawnFfmpegNvenc({ width: capW, height: capH, fps, format: "mp4", encoder: process.env.RENDER_ENCODER || "h264_nvenc" });
+            ffmpeg.proc.stdout.on("data", (d) => mp4Chunks.push(Buffer.from(d)));
+            ffmpeg.proc.stderr.on("data", (d) => process.env.DEBUG_FFMPEG && console.error("[ffmpeg]", d.toString()));
+            // Frame delivery (RGBA)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await page.exposeFunction("__nodeDeliverFrameRGBA", async (payload) => {
+                const buf = toBuffer(payload);
+                if (!ffmpeg)
+                    throw new Error("ffmpeg not initialized");
+                if (!ffmpeg.proc.stdin.write(buf)) {
+                    await new Promise((resolve) => ffmpeg.proc.stdin.once("drain", () => resolve()));
+                }
+                return true;
+            });
+            await page.exposeFunction("__nodeDeliverEnd", async () => {
+                try {
+                    ffmpeg?.proc.stdin.end();
+                }
+                catch { }
+                return true;
+            });
+        }
+        else {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await page.exposeFunction("__nodeDeliverWebM", async (payload) => {
+                const buf = toBuffer(payload);
+                buffers.push(buf);
+                totalBytes += buf.length;
+                deliverCalls += 1;
+                console.log(`[server] received webm payload: call=${deliverCalls}, bytes=${buf.length}, total=${totalBytes}`);
+            });
+        }
         // Log the resolved style for debugging
         try {
             console.log("Using style URL:", program.style);
@@ -876,15 +1080,32 @@ app.post("/api/animate", async (req, res) => {
             // @ts-ignore
             return window.startRender(program);
         }, program);
-        // 6) Upload to S3 (or Render disk)
-        const videoBuf = Buffer.concat(buffers);
-        console.log(`[server] page.evaluate done. buffers=${buffers.length}, totalBytes=${totalBytes}`);
-        if (!videoBuf?.length) {
-            console.error('[server] no video bytes received; aborting upload');
-            throw new Error('no_video_bytes');
+        // 6) Upload to S3
+        let url;
+        if (wantMp4) {
+            await new Promise((resolve, reject) => {
+                ffmpeg?.proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error("ffmpeg_exit_" + code))));
+                try {
+                    ffmpeg?.proc.stdin.end();
+                }
+                catch { }
+            });
+            const videoBuf = Buffer.concat(mp4Chunks);
+            if (!videoBuf?.length)
+                throw new Error("no_video_bytes");
+            console.log(`[server] uploading MP4 to S3 size=${videoBuf.length}`);
+            url = await putVideoMp4(videoBuf);
         }
-        console.log(`[server] uploading to S3 size=${videoBuf.length}`);
-        const url = await putVideoWebm(videoBuf);
+        else {
+            const videoBuf = Buffer.concat(buffers);
+            console.log(`[server] page.evaluate done. buffers=${buffers.length}, totalBytes=${totalBytes}`);
+            if (!videoBuf?.length) {
+                console.error('[server] no video bytes received; aborting upload');
+                throw new Error('no_video_bytes');
+            }
+            console.log(`[server] uploading WebM to S3 size=${videoBuf.length}`);
+            url = await putVideoWebm(videoBuf);
+        }
         console.log(`[server] upload complete url=${url}`);
         await page.close();
         await browser.close();

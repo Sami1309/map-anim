@@ -1,0 +1,24 @@
+
+> map-anim-service@0.1.0 dev
+> tsx watch src/server.ts
+
+node:net:1915
+      const error = new UVExceptionWithHostPort(rval, 'listen', address, port);
+                    ^
+
+Error: listen EPERM: operation not permitted /var/folders/dd/hbpz6tjn62q34blxzgfystgm0000gn/T/tsx-501/52061.pipe
+    at Server.setupListenHandle [as _listen2] (node:net:1915:21)
+    at listenInCluster (node:net:1994:12)
+    at Server.listen (node:net:2116:5)
+    at file:///Users/sam/map-anim-service/node_modules/tsx/dist/cli.mjs:53:31537
+    at new Promise (<anonymous>)
+    at createIpcServer (file:///Users/sam/map-anim-service/node_modules/tsx/dist/cli.mjs:53:31515)
+    at async file:///Users/sam/map-anim-service/node_modules/tsx/dist/cli.mjs:53:32752 {
+  code: 'EPERM',
+  errno: -1,
+  syscall: 'listen',
+  address: '/var/folders/dd/hbpz6tjn62q34blxzgfystgm0000gn/T/tsx-501/52061.pipe',
+  port: -1
+}
+
+Node.js v23.6.1

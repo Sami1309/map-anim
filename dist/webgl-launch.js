@@ -38,28 +38,34 @@ export async function launchBrowserWithWebGL() {
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
         "--hide-scrollbars",
-        "--mute-audio"
+        "--mute-audio",
+        "--ignore-gpu-blocklist"
     ];
+    const executablePath = process.env.CHROME_PATH || undefined;
     const candidates = [
         {
-            name: "swiftshader-angle",
-            opts: { headless: "new", args: [...baseArgs, "--use-gl=swiftshader", "--use-angle=swiftshader", "--enable-webgl", "--ignore-gpu-blocklist"] }
-        },
-        {
-            name: "swiftshader-angle-no-vulkan",
-            opts: { headless: "new", args: [...baseArgs, "--use-gl=swiftshader", "--use-angle=swiftshader", "--disable-vulkan", "--enable-webgl", "--ignore-gpu-blocklist"] }
-        },
-        {
-            name: "angle-gl",
-            opts: { headless: "new", args: [...baseArgs, "--use-gl=angle", "--use-angle=gl", "--enable-webgl", "--ignore-gpu-blocklist"] }
+            name: "gpu-egl-angle",
+            opts: { headless: "new", executablePath, args: [...baseArgs, "--enable-gpu", "--disable-software-rasterizer", "--use-gl=egl", "--use-angle=gl"] }
         },
         {
             name: "egl",
-            opts: { headless: "new", args: [...baseArgs, "--use-gl=egl", "--enable-webgl", "--ignore-gpu-blocklist"] }
+            opts: { headless: "new", executablePath, args: [...baseArgs, "--use-gl=egl"] }
+        },
+        {
+            name: "angle-gl",
+            opts: { headless: "new", executablePath, args: [...baseArgs, "--use-gl=angle", "--use-angle=gl"] }
+        },
+        {
+            name: "swiftshader-angle",
+            opts: { headless: "new", executablePath, args: [...baseArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"] }
+        },
+        {
+            name: "swiftshader-angle-no-vulkan",
+            opts: { headless: "new", executablePath, args: [...baseArgs, "--use-gl=swiftshader", "--use-angle=swiftshader", "--disable-vulkan"] }
         },
         {
             name: "default-headless",
-            opts: { headless: "new", args: [...baseArgs, "--enable-webgl", "--ignore-gpu-blocklist"] }
+            opts: { headless: "new", executablePath, args: [...baseArgs] }
         }
     ];
     const errors = [];
