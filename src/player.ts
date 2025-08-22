@@ -309,6 +309,8 @@ export class MapAnimPlayer {
   private worldBorders?: any;
   private lastStyleKey?: string;
   private lastSize?: { w: number; h: number };
+  private deckOverlay?: any;
+  private lastGoogle3dKey?: string;
 
   static async create(opts: PlayerOptions) {
     const p = new MapAnimPlayer(opts);
@@ -348,6 +350,57 @@ export class MapAnimPlayer {
     } catch {}
 
     await new Promise(res => (this.map as any).once('load', res));
+  }
+
+  private async ensureDeckAndLoaders() {
+    function loadScript(src: string) {
+      return new Promise<void>((res, rej) => {
+        const s = document.createElement('script');
+        s.src = src; s.async = true; s.onload = () => res(); s.onerror = (e) => rej(e);
+        document.head.appendChild(s);
+      });
+    }
+    // Load deck.gl and loaders.gl UMD bundles lazily when needed
+    if (!(window as any).deck) {
+      await loadScript('https://unpkg.com/deck.gl@9.1.0/dist.min.js');
+    }
+    if (!(window as any).loaders) {
+      await loadScript('https://unpkg.com/@loaders.gl/core@4.3.4/dist/dist.min.js');
+    }
+    if (!(window as any).loadersTiles) {
+      await loadScript('https://unpkg.com/@loaders.gl/tiles@4.3.4/dist/dist.min.js');
+    }
+    if (!(window as any).loaders3dTiles) {
+      await loadScript('https://unpkg.com/@loaders.gl/3d-tiles@4.3.4/dist/dist.min.js');
+    }
+  }
+
+  private async updateGoogle3DOverlay(program: any) {
+    const apiKey: string | undefined = program?.flags?.google3dApiKey;
+    try { console.log('[player] google 3d overlay: key present?', !!apiKey); } catch {}
+    if (!this.map) return;
+    if (!apiKey) {
+      if (this.deckOverlay) {
+        try { this.deckOverlay.setProps({ layers: [] }); this.deckOverlay.finalize?.(); } catch {}
+        this.deckOverlay = null; this.lastGoogle3dKey = undefined;
+      }
+      return;
+    }
+    if (this.lastGoogle3dKey === apiKey && this.deckOverlay) return;
+    await this.ensureDeckAndLoaders();
+    const deckNS: any = (window as any).deck;
+    const loaders3d: any = (window as any).loaders3dTiles || (window as any).loaders?._3dTiles || (window as any).loaders;
+    const Tiles3DLoader = loaders3d?.Tiles3DLoader || (loaders3d && loaders3d['Tiles3DLoader']);
+    if (!deckNS || !Tiles3DLoader) { try { console.warn('[player] deck.gl not available for 3D overlay'); } catch {} return; }
+    const root = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`;
+    const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
+    if (!this.deckOverlay) {
+      this.deckOverlay = new deckNS.MapboxOverlay({ interleaved: true, layers: [layer] });
+      try { this.map.addControl(this.deckOverlay as any); } catch {}
+    } else {
+      this.deckOverlay.setProps({ layers: [layer] });
+    }
+    this.lastGoogle3dKey = apiKey;
   }
 
   async resolve(payload: { text?: string; program?: any }) {
@@ -400,6 +453,8 @@ export class MapAnimPlayer {
     }
 
     await setupBorderLayers(this.map, program, this.worldBorders, anim);
+    // Optional: Google 3D Tiles overlay (preview)
+    await this.updateGoogle3DOverlay(program);
 
     // Optional: fit end keyframe to boundary if explicitly set
     try {
@@ -455,9 +510,123 @@ export class MapAnimPlayer {
     }
   }
 
+  // Compute total timeline duration across declared phases
+  getDuration(program: any): number {
+    if (!program) return 3000
+    const phases: string[] = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom','trace','hold'];
+    const duration: number = program?.camera?.keyframes?.at?.(-1)?.t || 0;
+    const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
+    const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
+    const holdMs = Math.max(0, Number(program.border?.traceHoldMs ?? 2000));
+    const highlightMs = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+    let total = 0;
+    for (const ph of phases) {
+      if (ph === 'zoom') total += duration;
+      else if (ph === 'wait') total += waitMs;
+      else if (ph === 'trace') total += traceMs;
+      else if (ph === 'hold') total += holdMs;
+      else if (ph === 'highlight') total += highlightMs;
+    }
+    return total || duration || 3000;
+  }
+
+  // Move visual state to a specific time (ms) on the full timeline
+  async seek(program: any, tMs: number) {
+    if (!this.map) throw new Error('player_not_initialized');
+    if (!program) return;
+    await waitStyleReady(this.map, 400);
+    const anim = AnimationCore as any;
+    const phases: string[] = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom','trace','hold'];
+    const duration: number = program?.camera?.keyframes?.at?.(-1)?.t || 0;
+    const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
+    const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
+    const holdMs = Math.max(0, Number(program.border?.traceHoldMs ?? 2000));
+    const highlightMs = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+    const easeName: string = program.animation?.easing || 'easeOutCubic';
+    const ease = anim.EASING?.[easeName] || anim.EASING.easeOutCubic;
+
+    const segs: Array<{ name: string; dur: number }> = [];
+    for (const ph of phases) {
+      if (ph === 'zoom') segs.push({ name: 'zoom', dur: duration });
+      else if (ph === 'wait') segs.push({ name: 'wait', dur: waitMs });
+      else if (ph === 'trace') segs.push({ name: 'trace', dur: traceMs });
+      else if (ph === 'hold') segs.push({ name: 'hold', dur: holdMs });
+      else if (ph === 'highlight') segs.push({ name: 'highlight', dur: highlightMs });
+    }
+    const total = segs.reduce((a, s) => a + s.dur, 0) || duration;
+    let t = Math.max(0, Math.min(tMs, total));
+
+    // Baseline paints
+    try {
+      const borderOpacity = program.border?.opacity ?? 1;
+      this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+      this.map.setPaintProperty('border_drawn', 'line-opacity', borderOpacity);
+      this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+    } catch {}
+
+    let idx = 0; let acc = 0;
+    for (; idx < segs.length; idx++) { const d = segs[idx].dur; if (t <= acc + d) break; acc += d; }
+    const cur = segs[idx] || { name: 'zoom', dur: duration };
+    const local = cur.dur ? Math.max(0, Math.min(cur.dur, t - acc)) : 0;
+
+    if (cur.name === 'zoom') {
+      const tt = cur.dur > 0 ? ease(local / cur.dur) * duration : 0;
+      const [aIdx, bIdx] = anim.findSpan(program.camera.keyframes, tt);
+      const a = program.camera.keyframes[aIdx]; const b = program.camera.keyframes[bIdx];
+      const spanT = a.t === b.t ? 0 : (tt - a.t) / (b.t - a.t);
+      const pose = anim.lerpFrame(a, b, spanT);
+      try { this.map.jumpTo({ center: [pose.center[0], pose.center[1]], zoom: (function(){ const zBias = Number(program.animation?.zoomOffset ?? -0.5); return pose.zoom + zBias; })(), bearing: pose.bearing, pitch: pose.pitch }); } catch {}
+      try { if (!program.border?.showDuringZoom) { this.map.setPaintProperty('border_line', 'line-opacity', 0.0); this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0); } } catch {}
+    } else if (cur.name === 'wait') {
+      try { if (!program.border?.showDuringZoom) { this.map.setPaintProperty('border_line', 'line-opacity', 0.0); this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0); } } catch {}
+    } else if (cur.name === 'highlight') {
+      const p = cur.dur > 0 ? local / cur.dur : 1;
+      const v = anim.EASING.easeOutCubic(p);
+      try {
+        if (this.map.getLayer('boundary-fill')) {
+          const targetFill = (typeof program.boundaryFillOpacity === 'number') ? program.boundaryFillOpacity : 0.25;
+          this.map.setPaintProperty('boundary-fill', 'fill-opacity', targetFill * v);
+          if (this.map.getLayer('boundary-line')) this.map.setPaintProperty('boundary-line', 'line-opacity', 1 * v);
+        }
+      } catch {}
+    } else if (cur.name === 'trace') {
+      const prog = cur.dur > 0 ? (local / cur.dur) + 0.03 : 1.0;
+      const borderCol = anim.getBorderColor(program);
+      const gradTrace = ['interpolate',['linear'],['line-progress'],0,'rgba(255,255,255,0.0)',Math.max(0, prog - 0.02),'rgba(255,255,255,0.0)',prog,'rgba(255,255,255,1.0)',Math.min(1, prog + 0.02),'rgba(255,255,255,0.0)',1,'rgba(255,255,255,0.0)'];
+      const gradDrawn = ['interpolate',['linear'],['line-progress'],0,borderCol,Math.max(0, prog),borderCol,Math.min(1, prog + 0.001),'rgba(255,204,0,0.0)',1,'rgba(255,204,0,0.0)'];
+      try {
+        this.map.setPaintProperty('border_trace', 'line-gradient', gradTrace);
+        this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+        this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+        this.map.setPaintProperty('border_drawn', 'line-gradient', gradDrawn);
+        this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+      } catch (e) {
+        try {
+          this.map.setPaintProperty('border_trace', 'line-gradient', undefined);
+          this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+          this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+          this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+          this.map.setPaintProperty('border_drawn', 'line-color', borderCol);
+          this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+        } catch {}
+      }
+    } else if (cur.name === 'hold') {
+      try {
+        this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+        this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+        this.map.setPaintProperty('border_drawn', 'line-color', (AnimationCore as any).getBorderColor(program));
+        this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+      } catch {}
+    }
+    try { (this.map as any).triggerRepaint?.(); } catch {}
+  }
+
   async record(program: ResolvedProgram, opts?: RecordOptions & { signal?: AbortSignal }): Promise<Blob> {
     if (!this.map) throw new Error('player_not_initialized');
     await this.prepareForProgram(program);
+    // Ensure first frame is rendered before starting recording
+    await this.seek(program, 0);
+    await new Promise(res => requestAnimationFrame(() => res(undefined)));
 
     const canvas: HTMLCanvasElement = this.map.getCanvas();
     const fps = Number(program.output?.fps || 30);
@@ -466,14 +635,15 @@ export class MapAnimPlayer {
 
     const chunks: BlobPart[] = [];
     const mime = opts?.mimeType || 'video/webm;codecs=vp9';
-    const rec: MediaRecorder = new (window as any).MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond });
+    const rec: MediaRecorder = new (window as any).MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
     await new Promise<void>((resolve, reject) => {
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       rec.onstop = () => resolve();
       rec.onerror = (e) => reject((e as any)?.error || e);
       rec.start(Math.round(1000 / fps)); // timeslice flush
-      // Run playback while recording
-      this.play(program, opts).then(() => rec.stop()).catch((e) => { try { rec.stop(); } catch {} reject(e); });
+      // High-fidelity playback while recording by default
+      const playOpts: any = { ...(opts || {}), waitForTiles: opts?.waitForTiles !== false };
+      this.play(program, playOpts).then(() => rec.stop()).catch((e) => { try { rec.stop(); } catch {} reject(e); });
     });
     return new Blob(chunks, { type: mime });
   }

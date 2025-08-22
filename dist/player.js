@@ -200,6 +200,31 @@ const AnimationCore = (() => {
     }
     return { lerp, lerpFrame, EASING, findSpan, getBorderColor, getTraceColor, getTraceDelta, runZoomPhase, runWaitPhase, runTracePhase, runHoldPhase, runHighlightPhase };
 })();
+// Robust style readiness helper: resolves on next 'styledata' or after timeout
+async function waitStyleReady(map, timeoutMs = 800) {
+    try {
+        if (map?.isStyleLoaded?.())
+            return;
+    }
+    catch { }
+    await new Promise((resolve) => {
+        let done = false;
+        const onData = () => { if (done)
+            return; done = true; try {
+            map.off?.('styledata', onData);
+        }
+        catch { } resolve(); };
+        try {
+            map.on?.('styledata', onData);
+        }
+        catch { }
+        setTimeout(() => { if (done)
+            return; done = true; try {
+            map.off?.('styledata', onData);
+        }
+        catch { } resolve(); }, Math.max(100, timeoutMs));
+    });
+}
 function computeBaseFromCurrentScript() {
     try {
         const cur = document.currentScript;
@@ -215,15 +240,6 @@ function computeBaseFromCurrentScript() {
     }
     catch { }
     return undefined;
-}
-async function waitStyleReady(map, timeoutMs = 800) {
-    try { if (map?.isStyleLoaded?.()) return; } catch {}
-    await new Promise((resolve) => {
-        let done = false;
-        const onData = () => { if (done) return; done = true; try { map.off?.('styledata', onData); } catch {} resolve(); };
-        try { map.on?.('styledata', onData); } catch {}
-        setTimeout(() => { if (done) return; done = true; try { map.off?.('styledata', onData); } catch {} resolve(); }, Math.max(100, timeoutMs));
-    });
 }
 async function loadScriptOnce(src) {
     if (document.querySelector(`script[data-src="${src}"]`))
@@ -310,7 +326,7 @@ async function setupBorderLayers(map, program, worldBorders, anim) {
     }
     const borderPolys = toFeatureCollectionMaybe(program.boundaryGeoJSON || fallbackPolys);
     const borderLines = polygonToLines(borderPolys);
-    // Wait for style to be ready
+    // Wait for style to be ready (tolerant with timeout)
     await waitStyleReady(map, 800);
     if (map.getSource('border_src')) {
         map.getSource('border_src').setData(borderPolys);
@@ -400,6 +416,8 @@ export class MapAnimPlayer {
     worldBorders;
     lastStyleKey;
     lastSize;
+    deckOverlay;
+    lastGoogle3dKey;
     static async create(opts) {
         const p = new MapAnimPlayer(opts);
         await p.init();
@@ -428,7 +446,7 @@ export class MapAnimPlayer {
         }
         // Default size; will adjust for program on play/record
         if (!inner.style.width || !inner.style.height)
-        setContainerFixedSize(this.container, 960, 540);
+            setContainerFixedSize(this.container, 960, 540);
         this.map = new maplibre.Map({ container: inner, style: this.styleUrl, center: [0, 0], zoom: 1, pitch: 0, bearing: 0, attributionControl: true, interactive: false });
         // Lazy-load Natural Earth borders for ISO3 fallback (no await)
         try {
@@ -437,6 +455,78 @@ export class MapAnimPlayer {
         }
         catch { }
         await new Promise(res => this.map.once('load', res));
+    }
+    async ensureDeckAndLoaders() {
+        function loadScript(src) {
+            return new Promise((res, rej) => {
+                const s = document.createElement('script');
+                s.src = src;
+                s.async = true;
+                s.onload = () => res();
+                s.onerror = (e) => rej(e);
+                document.head.appendChild(s);
+            });
+        }
+        // Load deck.gl and loaders.gl UMD bundles lazily when needed
+        if (!window.deck) {
+            await loadScript('https://unpkg.com/deck.gl@9.1.0/dist.min.js');
+        }
+        if (!window.loaders) {
+            await loadScript('https://unpkg.com/@loaders.gl/core@4.3.4/dist/dist.min.js');
+        }
+        if (!window.loadersTiles) {
+            await loadScript('https://unpkg.com/@loaders.gl/tiles@4.3.4/dist/dist.min.js');
+        }
+        if (!window.loaders3dTiles) {
+            await loadScript('https://unpkg.com/@loaders.gl/3d-tiles@4.3.4/dist/dist.min.js');
+        }
+    }
+    async updateGoogle3DOverlay(program) {
+        const apiKey = program?.flags?.google3dApiKey;
+        try {
+            console.log('[player] google 3d overlay: key present?', !!apiKey);
+        }
+        catch { }
+        if (!this.map)
+            return;
+        if (!apiKey) {
+            if (this.deckOverlay) {
+                try {
+                    this.deckOverlay.setProps({ layers: [] });
+                    this.deckOverlay.finalize?.();
+                }
+                catch { }
+                this.deckOverlay = null;
+                this.lastGoogle3dKey = undefined;
+            }
+            return;
+        }
+        if (this.lastGoogle3dKey === apiKey && this.deckOverlay)
+            return;
+        await this.ensureDeckAndLoaders();
+        const deckNS = window.deck;
+        const loaders3d = window.loaders3dTiles || window.loaders?._3dTiles || window.loaders;
+        const Tiles3DLoader = loaders3d?.Tiles3DLoader || (loaders3d && loaders3d['Tiles3DLoader']);
+        if (!deckNS || !Tiles3DLoader) {
+            try {
+                console.warn('[player] deck.gl not available for 3D overlay');
+            }
+            catch { }
+            return;
+        }
+        const root = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`;
+        const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
+        if (!this.deckOverlay) {
+            this.deckOverlay = new deckNS.MapboxOverlay({ interleaved: true, layers: [layer] });
+            try {
+                this.map.addControl(this.deckOverlay);
+            }
+            catch { }
+        }
+        else {
+            this.deckOverlay.setProps({ layers: [layer] });
+        }
+        this.lastGoogle3dKey = apiKey;
     }
     async resolve(payload) {
         const r = await fetch(`${this.serverBase}/api/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -486,6 +576,7 @@ export class MapAnimPlayer {
                 styleInput = this.styleUrl;
             }
         }
+        // Only setStyle if changed (avoid repeated full style reloads that can race)
         let nextStyleKey = '';
         try {
             nextStyleKey = typeof styleInput === 'string' ? `str:${styleInput}` : `obj:${JSON.stringify(styleInput)}`;
@@ -516,6 +607,8 @@ export class MapAnimPlayer {
             catch { }
         }
         await setupBorderLayers(this.map, program, this.worldBorders, anim);
+        // Optional: Google 3D Tiles overlay (preview)
+        await this.updateGoogle3DOverlay(program);
         // Optional: fit end keyframe to boundary if explicitly set
         try {
             const feat = (program.boundaryGeoJSON?.features || [])[0];
@@ -550,6 +643,10 @@ export class MapAnimPlayer {
     async play(program, opts) {
         if (!this.map)
             throw new Error('player_not_initialized');
+        try {
+            this.map.stop?.();
+        }
+        catch { }
         await this.prepareForProgram(program);
         // Access shared animation helpers imported at module load
         const anim = AnimationCore;
@@ -590,10 +687,166 @@ export class MapAnimPlayer {
             catch { }
         }
     }
+    // Compute total timeline duration across declared phases
+    getDuration(program) {
+        if (!program)
+            return 3000;
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
+        const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
+        const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
+        const holdMs = Math.max(0, Number(program.border?.traceHoldMs ?? 2000));
+        const highlightMs = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+        let total = 0;
+        for (const ph of phases) {
+            if (ph === 'zoom')
+                total += duration;
+            else if (ph === 'wait')
+                total += waitMs;
+            else if (ph === 'trace')
+                total += traceMs;
+            else if (ph === 'hold')
+                total += holdMs;
+            else if (ph === 'highlight')
+                total += highlightMs;
+        }
+        return total || duration || 3000;
+    }
+    // Move visual state to a specific time (ms) on the full timeline
+    async seek(program, tMs) {
+        if (!this.map)
+            throw new Error('player_not_initialized');
+        if (!program)
+            return;
+        await waitStyleReady(this.map, 400);
+        const anim = AnimationCore;
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
+        const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
+        const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
+        const holdMs = Math.max(0, Number(program.border?.traceHoldMs ?? 2000));
+        const highlightMs = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+        const easeName = program.animation?.easing || 'easeOutCubic';
+        const ease = anim.EASING?.[easeName] || anim.EASING.easeOutCubic;
+        const segs = [];
+        for (const ph of phases) {
+            if (ph === 'zoom')
+                segs.push({ name: 'zoom', dur: duration });
+            else if (ph === 'wait')
+                segs.push({ name: 'wait', dur: waitMs });
+            else if (ph === 'trace')
+                segs.push({ name: 'trace', dur: traceMs });
+            else if (ph === 'hold')
+                segs.push({ name: 'hold', dur: holdMs });
+            else if (ph === 'highlight')
+                segs.push({ name: 'highlight', dur: highlightMs });
+        }
+        const total = segs.reduce((a, s) => a + s.dur, 0) || duration;
+        let t = Math.max(0, Math.min(tMs, total));
+        // Baseline paints
+        try {
+            const borderOpacity = program.border?.opacity ?? 1;
+            this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+            this.map.setPaintProperty('border_drawn', 'line-opacity', borderOpacity);
+            this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+        }
+        catch { }
+        let idx = 0;
+        let acc = 0;
+        for (; idx < segs.length; idx++) {
+            const d = segs[idx].dur;
+            if (t <= acc + d)
+                break;
+            acc += d;
+        }
+        const cur = segs[idx] || { name: 'zoom', dur: duration };
+        const local = cur.dur ? Math.max(0, Math.min(cur.dur, t - acc)) : 0;
+        if (cur.name === 'zoom') {
+            const tt = cur.dur > 0 ? ease(local / cur.dur) * duration : 0;
+            const [aIdx, bIdx] = anim.findSpan(program.camera.keyframes, tt);
+            const a = program.camera.keyframes[aIdx];
+            const b = program.camera.keyframes[bIdx];
+            const spanT = a.t === b.t ? 0 : (tt - a.t) / (b.t - a.t);
+            const pose = anim.lerpFrame(a, b, spanT);
+            try {
+                this.map.jumpTo({ center: [pose.center[0], pose.center[1]], zoom: (function () { const zBias = Number(program.animation?.zoomOffset ?? -0.5); return pose.zoom + zBias; })(), bearing: pose.bearing, pitch: pose.pitch });
+            }
+            catch { }
+            try {
+                if (!program.border?.showDuringZoom) {
+                    this.map.setPaintProperty('border_line', 'line-opacity', 0.0);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'wait') {
+            try {
+                if (!program.border?.showDuringZoom) {
+                    this.map.setPaintProperty('border_line', 'line-opacity', 0.0);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'highlight') {
+            const p = cur.dur > 0 ? local / cur.dur : 1;
+            const v = anim.EASING.easeOutCubic(p);
+            try {
+                if (this.map.getLayer('boundary-fill')) {
+                    const targetFill = (typeof program.boundaryFillOpacity === 'number') ? program.boundaryFillOpacity : 0.25;
+                    this.map.setPaintProperty('boundary-fill', 'fill-opacity', targetFill * v);
+                    if (this.map.getLayer('boundary-line'))
+                        this.map.setPaintProperty('boundary-line', 'line-opacity', 1 * v);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'trace') {
+            const prog = cur.dur > 0 ? (local / cur.dur) + 0.03 : 1.0;
+            const borderCol = anim.getBorderColor(program);
+            const gradTrace = ['interpolate', ['linear'], ['line-progress'], 0, 'rgba(255,255,255,0.0)', Math.max(0, prog - 0.02), 'rgba(255,255,255,0.0)', prog, 'rgba(255,255,255,1.0)', Math.min(1, prog + 0.02), 'rgba(255,255,255,0.0)', 1, 'rgba(255,255,255,0.0)'];
+            const gradDrawn = ['interpolate', ['linear'], ['line-progress'], 0, borderCol, Math.max(0, prog), borderCol, Math.min(1, prog + 0.001), 'rgba(255,204,0,0.0)', 1, 'rgba(255,204,0,0.0)'];
+            try {
+                this.map.setPaintProperty('border_trace', 'line-gradient', gradTrace);
+                this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+                this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+                this.map.setPaintProperty('border_drawn', 'line-gradient', gradDrawn);
+                this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+            }
+            catch (e) {
+                try {
+                    this.map.setPaintProperty('border_trace', 'line-gradient', undefined);
+                    this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+                    this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+                    this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+                    this.map.setPaintProperty('border_drawn', 'line-color', borderCol);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+                }
+                catch { }
+            }
+        }
+        else if (cur.name === 'hold') {
+            try {
+                this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+                this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+                this.map.setPaintProperty('border_drawn', 'line-color', AnimationCore.getBorderColor(program));
+                this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+            }
+            catch { }
+        }
+        try {
+            this.map.triggerRepaint?.();
+        }
+        catch { }
+    }
     async record(program, opts) {
         if (!this.map)
             throw new Error('player_not_initialized');
         await this.prepareForProgram(program);
+        // Ensure first frame is rendered before starting recording
+        await this.seek(program, 0);
+        await new Promise(res => requestAnimationFrame(() => res(undefined)));
         const canvas = this.map.getCanvas();
         const fps = Number(program.output?.fps || 30);
         const stream = canvas.captureStream ? canvas.captureStream(fps) : canvas.captureStream?.();
@@ -601,15 +854,16 @@ export class MapAnimPlayer {
             throw new Error('captureStream_not_supported');
         const chunks = [];
         const mime = opts?.mimeType || 'video/webm;codecs=vp9';
-        const rec = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond });
+        const rec = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
         await new Promise((resolve, reject) => {
             rec.ondataavailable = (e) => { if (e.data && e.data.size)
                 chunks.push(e.data); };
             rec.onstop = () => resolve();
             rec.onerror = (e) => reject(e?.error || e);
             rec.start(Math.round(1000 / fps)); // timeslice flush
-            // Run playback while recording
-            this.play(program, opts).then(() => rec.stop()).catch((e) => { try {
+            // High-fidelity playback while recording by default
+            const playOpts = { ...(opts || {}), waitForTiles: opts?.waitForTiles !== false };
+            this.play(program, playOpts).then(() => rec.stop()).catch((e) => { try {
                 rec.stop();
             }
             catch { } reject(e); });

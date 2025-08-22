@@ -30,6 +30,7 @@ export default function App() {
   const [terrain, setTerrain] = useState(false);
   const [google3dEnabled, setGoogle3dEnabled] = useState(false);
   const [google3dKey, setGoogle3dKey] = useState<string>((import.meta as any).env?.VITE_GOOGLE_TILES_API_KEY || "");
+  const [hiResBorders, setHiResBorders] = useState(false);
 
   // Detect address in prompt to surface a UI hint
   function detectAddress(s: string): boolean {
@@ -217,17 +218,7 @@ export default function App() {
           </div>
         )}
 
-        <h3>Map Style</h3>
-        <div className="cfg">
-          <label>Style</label>
-          <select value={selectedStyleUrl} onChange={e => handleStyleChange(e.target.value)}>
-            {MAP_STYLES.map(style => (
-              <option key={style.url} value={style.url} title={style.description}>
-                {style.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Map style moved to top of right pane to reduce clutter */}
 
         <div className="row" style={{ marginTop: 12 }}>
           <button type="button" onClick={() => setAdvancedEnabled(v => !v)}>
@@ -369,6 +360,24 @@ export default function App() {
       </div>
 
       <div className="right">
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+          <label style={{ fontSize: 12, color: '#444' }}>Map style</label>
+          <select value={selectedStyleUrl} onChange={e => handleStyleChange(e.target.value)}>
+            {MAP_STYLES.map(style => (
+              <option key={style.url} value={style.url} title={style.description}>
+                {style.name}
+              </option>
+            ))}
+          </select>
+          <label style={{ fontSize: 12, color: '#444', marginLeft: 12 }}>Hi‑res borders</label>
+          <label className="switch">
+            <input type="checkbox" checked={hiResBorders} onChange={(e) => {
+              setHiResBorders(e.target.checked);
+              if (program) setProgram({ ...program, flags: { ...(program as any).flags, hiResBorders: e.target.checked } } as any);
+            }} />
+            <span className="slider"></span>
+          </label>
+        </div>
         <MapPreview
           program={program}
           aspectRatio={aspectRatio}
