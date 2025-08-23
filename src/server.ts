@@ -369,6 +369,7 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
   try {
     const text: string | undefined = req.body?.text;
     const incomingProgram = req.body?.program;
+    const requestedDurationMs: number | undefined = (() => { const v = Number(req.body?.durationMs || req.body?.program?.output?.durationMs || req.body?.program?.animation?.durationMs); return Number.isFinite(v) && v > 0 ? v : undefined })();
     let program: MapProgramType;
     console.log("got", text, incomingProgram)
     if (incomingProgram) {
@@ -435,6 +436,30 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
       if (cap && Number.isFinite(cap)) p.output.fps = Math.min(p.output.fps || cap, cap);
       return p;
     })(program);
+
+    // Optional: scale camera keyframes to the requested duration for the zoom phase only
+    try {
+      if (requestedDurationMs && program?.camera?.keyframes?.length) {
+        const kfs = program.camera.keyframes as any[];
+        const maxT = Math.max(...kfs.map((k:any)=> Number(k.t) || 0), 0);
+        if (maxT > 0 && Math.abs(maxT - requestedDurationMs) > 1) {
+          const s = requestedDurationMs / maxT;
+          program.camera.keyframes = kfs.map((k:any) => ({ ...k, t: Math.round((Number(k.t)||0) * s) }));
+        }
+      }
+      if (requestedDurationMs && Array.isArray(program?.segments)) {
+        for (const seg of (program.segments as any[])) {
+          const skfs = seg?.camera?.keyframes as any[] | undefined
+          if (skfs && skfs.length) {
+            const maxT = Math.max(...skfs.map((k:any)=> Number(k.t) || 0), 0);
+            if (maxT > 0 && Math.abs(maxT - requestedDurationMs) > 1) {
+              const s = requestedDurationMs / maxT;
+              seg.camera.keyframes = skfs.map((k:any) => ({ ...k, t: Math.round((Number(k.t)||0) * s) }));
+            }
+          }
+        }
+      }
+    } catch {}
 
     console.log("program is", program.camera.keyframes)
     res.json({ program });

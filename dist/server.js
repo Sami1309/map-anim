@@ -406,6 +406,7 @@ app.post("/api/resolve", async (req, res) => {
     try {
         const text = req.body?.text;
         const incomingProgram = req.body?.program;
+        const requestedDurationMs = (() => { const v = Number(req.body?.durationMs || req.body?.program?.output?.durationMs || req.body?.program?.animation?.durationMs); return Number.isFinite(v) && v > 0 ? v : undefined; })();
         let program;
         console.log("got", text, incomingProgram);
         if (incomingProgram) {
@@ -486,6 +487,30 @@ app.post("/api/resolve", async (req, res) => {
                 p.output.fps = Math.min(p.output.fps || cap, cap);
             return p;
         })(program);
+        // Optional: scale camera keyframes to the requested duration for the zoom phase only
+        try {
+            if (requestedDurationMs && program?.camera?.keyframes?.length) {
+                const kfs = program.camera.keyframes;
+                const maxT = Math.max(...kfs.map((k) => Number(k.t) || 0), 0);
+                if (maxT > 0 && Math.abs(maxT - requestedDurationMs) > 1) {
+                    const s = requestedDurationMs / maxT;
+                    program.camera.keyframes = kfs.map((k) => ({ ...k, t: Math.round((Number(k.t) || 0) * s) }));
+                }
+            }
+            if (requestedDurationMs && Array.isArray(program?.segments)) {
+                for (const seg of program.segments) {
+                    const skfs = seg?.camera?.keyframes;
+                    if (skfs && skfs.length) {
+                        const maxT = Math.max(...skfs.map((k) => Number(k.t) || 0), 0);
+                        if (maxT > 0 && Math.abs(maxT - requestedDurationMs) > 1) {
+                            const s = requestedDurationMs / maxT;
+                            seg.camera.keyframes = skfs.map((k) => ({ ...k, t: Math.round((Number(k.t) || 0) * s) }));
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
         console.log("program is", program.camera.keyframes);
         res.json({ program });
     }

@@ -418,6 +418,7 @@ export class MapAnimPlayer {
     lastSize;
     deckOverlay;
     lastGoogle3dKey;
+    lastProgram;
     static async create(opts) {
         const p = new MapAnimPlayer(opts);
         await p.init();
@@ -535,6 +536,7 @@ export class MapAnimPlayer {
         return await r.json(); // { program }
     }
     async prepareForProgram(program) {
+        this.lastProgram = program;
         if (!this.map)
             throw new Error('player_not_initialized');
         const anim = AnimationCore;
@@ -718,6 +720,7 @@ export class MapAnimPlayer {
             throw new Error('player_not_initialized');
         if (!program)
             return;
+        this.lastProgram = program;
         await waitStyleReady(this.map, 400);
         const anim = AnimationCore;
         const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
@@ -839,6 +842,145 @@ export class MapAnimPlayer {
             this.map.triggerRepaint?.();
         }
         catch { }
+    }
+    // Faster, synchronous preview that does not wait on style events. Uses last prepared program if not supplied.
+    preview(opts) {
+        if (!this.map)
+            throw new Error('player_not_initialized');
+        const program = opts.program || this.lastProgram;
+        if (!program)
+            return;
+        const tMs = Math.max(0, Number(opts.timeMs) || 0);
+        const anim = AnimationCore;
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
+        const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
+        const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
+        const holdMs = Math.max(0, Number(program.border?.traceHoldMs ?? 2000));
+        const highlightMs = Math.max(500, Number(program.animation?.highlightDurationMs || 1200));
+        const easeName = program.animation?.easing || 'easeOutCubic';
+        const ease = anim.EASING?.[easeName] || anim.EASING.easeOutCubic;
+        const segs = [];
+        for (const ph of phases) {
+            if (ph === 'zoom')
+                segs.push({ name: 'zoom', dur: duration });
+            else if (ph === 'wait')
+                segs.push({ name: 'wait', dur: waitMs });
+            else if (ph === 'trace')
+                segs.push({ name: 'trace', dur: traceMs });
+            else if (ph === 'hold')
+                segs.push({ name: 'hold', dur: holdMs });
+            else if (ph === 'highlight')
+                segs.push({ name: 'highlight', dur: highlightMs });
+        }
+        const total = segs.reduce((a, s) => a + s.dur, 0) || duration;
+        const t = Math.max(0, Math.min(tMs, total));
+        try {
+            const borderOpacity = program.border?.opacity ?? 1;
+            this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+            this.map.setPaintProperty('border_drawn', 'line-opacity', borderOpacity);
+            this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+        }
+        catch { }
+        let idx = 0;
+        let acc = 0;
+        for (; idx < segs.length; idx++) {
+            const d = segs[idx].dur;
+            if (t <= acc + d)
+                break;
+            acc += d;
+        }
+        const cur = segs[idx] || { name: 'zoom', dur: duration };
+        const local = cur.dur ? Math.max(0, Math.min(cur.dur, t - acc)) : 0;
+        if (cur.name === 'zoom') {
+            const tt = cur.dur > 0 ? ease(local / cur.dur) * duration : 0;
+            const [aIdx, bIdx] = anim.findSpan(program.camera.keyframes, tt);
+            const a = program.camera.keyframes[aIdx];
+            const b = program.camera.keyframes[bIdx];
+            const spanT = a.t === b.t ? 0 : (tt - a.t) / (b.t - a.t);
+            const pose = anim.lerpFrame(a, b, spanT);
+            try {
+                this.map.jumpTo({ center: [pose.center[0], pose.center[1]], zoom: (function () { const zBias = Number(program.animation?.zoomOffset ?? -0.5); return pose.zoom + zBias; })(), bearing: pose.bearing, pitch: pose.pitch });
+            }
+            catch { }
+            try {
+                if (!program.border?.showDuringZoom) {
+                    this.map.setPaintProperty('border_line', 'line-opacity', 0.0);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'wait') {
+            try {
+                if (!program.border?.showDuringZoom) {
+                    this.map.setPaintProperty('border_line', 'line-opacity', 0.0);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', 0.0);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'highlight') {
+            const p = cur.dur > 0 ? local / cur.dur : 1;
+            const v = anim.EASING.easeOutCubic(p);
+            try {
+                if (this.map.getLayer('boundary-fill')) {
+                    const targetFill = (typeof program.boundaryFillOpacity === 'number') ? program.boundaryFillOpacity : 0.25;
+                    this.map.setPaintProperty('boundary-fill', 'fill-opacity', targetFill * v);
+                    if (this.map.getLayer('boundary-line'))
+                        this.map.setPaintProperty('boundary-line', 'line-opacity', 1 * v);
+                }
+            }
+            catch { }
+        }
+        else if (cur.name === 'trace') {
+            const prog = cur.dur > 0 ? (local / cur.dur) + 0.03 : 1.0;
+            const borderCol = anim.getBorderColor(program);
+            const gradTrace = ['interpolate', ['linear'], ['line-progress'], 0, 'rgba(255,255,255,0.0)', Math.max(0, prog - 0.02), 'rgba(255,255,255,0.0)', prog, 'rgba(255,255,255,1.0)', Math.min(1, prog + 0.02), 'rgba(255,255,255,0.0)', 1, 'rgba(255,255,255,0.0)'];
+            const gradDrawn = ['interpolate', ['linear'], ['line-progress'], 0, borderCol, Math.max(0, prog), borderCol, Math.min(1, prog + 0.001), 'rgba(255,204,0,0.0)', 1, 'rgba(255,204,0,0.0)'];
+            try {
+                this.map.setPaintProperty('border_trace', 'line-gradient', gradTrace);
+                this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+                this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+                this.map.setPaintProperty('border_drawn', 'line-gradient', gradDrawn);
+                this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+            }
+            catch (e) {
+                try {
+                    this.map.setPaintProperty('border_trace', 'line-gradient', undefined);
+                    this.map.setPaintProperty('border_trace', 'line-color', anim.getTraceColor(program));
+                    this.map.setPaintProperty('border_trace', 'line-opacity', 1.0);
+                    this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+                    this.map.setPaintProperty('border_drawn', 'line-color', borderCol);
+                    this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+                }
+                catch { }
+            }
+        }
+        else if (cur.name === 'hold') {
+            try {
+                this.map.setPaintProperty('border_trace', 'line-opacity', 0.0);
+                this.map.setPaintProperty('border_drawn', 'line-gradient', undefined);
+                this.map.setPaintProperty('border_drawn', 'line-color', AnimationCore.getBorderColor(program));
+                this.map.setPaintProperty('border_drawn', 'line-opacity', program.border?.opacity ?? 1);
+            }
+            catch { }
+        }
+        try {
+            this.map.triggerRepaint?.();
+        }
+        catch { }
+    }
+    setTime(ms) {
+        return this.preview({ timeMs: ms });
+    }
+    setProgress(p) {
+        const prog = this.lastProgram;
+        if (!prog)
+            return;
+        const total = this.getDuration(prog);
+        const ms = Math.max(0, Math.min(1, Number(p) || 0)) * total;
+        return this.preview({ timeMs: ms });
     }
     async record(program, opts) {
         if (!this.map)
