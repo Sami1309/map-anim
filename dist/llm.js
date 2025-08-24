@@ -67,8 +67,8 @@ const FEW_SHOTS = [
             camera: {
                 keyframes: [
                     { center: [-74.0060, 40.7128], zoom: 8, bearing: 0, pitch: 0, t: 0 },
-                    { center: [-74.0060, 40.7128], zoom: 12, bearing: 0, pitch: 20, t: 2000 },
-                    { center: [-74.0060, 40.7128], zoom: 17, bearing: 0, pitch: 50, t: 3000 }
+                    { center: [-74.0060, 40.7128], zoom: 13, bearing: 0, pitch: 20, t: 2000 },
+                    { center: [-74.0060, 40.7128], zoom: 18, bearing: 0, pitch: 50, t: 3000 }
                 ]
             },
             extras: { address: "123 Main Street, New York, NY" },

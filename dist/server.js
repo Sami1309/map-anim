@@ -586,19 +586,20 @@ async function augmentProgram(prog, text) {
                     p.camera = { keyframes: [] };
                 if (!p.camera.keyframes?.length) {
                     // Create a nice zoom-in animation to the address
-                    // Start from a regional view, then zoom to street level
+                    // Start from a regional view, then zoom to a realistic street-level close-up
                     p.camera.keyframes = [
                         { center: [lon, lat], zoom: 8, bearing: 0, pitch: 0, t: 0 },
-                        { center: [lon, lat], zoom: 12, bearing: 0, pitch: 20, t: 2000 },
-                        { center: [lon, lat], zoom: 17, bearing: 0, pitch: 50, t: 4000 }
+                        { center: [lon, lat], zoom: 13, bearing: 0, pitch: 20, t: 2000 },
+                        { center: [lon, lat], zoom: 18, bearing: 0, pitch: 50, t: 4000 }
                     ];
                 }
                 else {
                     // Update the final keyframe to center on the address
                     const last = p.camera.keyframes[p.camera.keyframes.length - 1];
                     last.center = [lon, lat];
-                    if (typeof last.zoom !== 'number' || last.zoom < 15)
-                        last.zoom = 17;
+                    // Ensure minimum close-up for address-level views
+                    if (typeof last.zoom !== 'number' || last.zoom < 18)
+                        last.zoom = 18;
                     // Ensure we have some pitch for street-level viewing
                     if (typeof last.pitch !== 'number' || last.pitch < 30)
                         last.pitch = 50;

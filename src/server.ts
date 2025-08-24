@@ -370,6 +370,7 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
     const text: string | undefined = req.body?.text;
     const incomingProgram = req.body?.program;
     const requestedDurationMs: number | undefined = (() => { const v = Number(req.body?.durationMs || req.body?.program?.output?.durationMs || req.body?.program?.animation?.durationMs); return Number.isFinite(v) && v > 0 ? v : undefined })();
+    const preferences: any = req.body?.preferences || {};
     let program: MapProgramType;
     console.log("got", text, incomingProgram)
     if (incomingProgram) {
@@ -461,6 +462,36 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
       }
     } catch {}
 
+    // Optional: upgrade boundary detail for country-level ISO3 when requested via preferences.borderQuality
+    try {
+      const wantHigh = String(preferences?.borderQuality || '').toLowerCase() === 'high';
+      const hasIso = (program as any)?.border?.isoA3;
+      const already = (program as any)?.boundaryGeoJSON;
+      if (wantHigh && hasIso && !already) {
+        const iso3 = String((program as any).border.isoA3 || '').toUpperCase();
+        try {
+          const url = 'https://unpkg.com/world-atlas@2.0.2/countries-10m.json';
+          const r = await fetch(url);
+          if (r.ok) {
+            const topo = await r.json() as any;
+            try {
+              const fc: any = (topojson as any).feature?.(topo, (topo as any).objects?.countries) || null;
+              if (fc && fc.features) {
+                const feats = fc.features.filter((f: any) => {
+                  const p = f.properties || {};
+                  const candidates = [p.ADM0_A3, p.ISO_A3, p['ISO3166-1-Alpha-3'], p.iso_a3];
+                  return candidates.map((x: any) => (x || '').toString().toUpperCase()).includes(iso3);
+                });
+                if (feats.length) {
+                  (program as any).boundaryGeoJSON = { type: 'FeatureCollection', features: feats } as any;
+                }
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+
     console.log("program is", program.camera.keyframes)
     res.json({ program });
   } catch (e: any) {
@@ -539,17 +570,18 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
         if (!p.camera) p.camera = { keyframes: [] };
         if (!p.camera.keyframes?.length) {
           // Create a nice zoom-in animation to the address
-          // Start from a regional view, then zoom to street level
-          p.camera.keyframes = [ 
-            { center: [lon, lat], zoom: 8, bearing: 0, pitch: 0, t: 0 }, 
-            { center: [lon, lat], zoom: 12, bearing: 0, pitch: 20, t: 2000 },
-            { center: [lon, lat], zoom: 17, bearing: 0, pitch: 50, t: 4000 } 
+          // Start from a regional view, then zoom to a realistic street-level close-up
+          p.camera.keyframes = [
+            { center: [lon, lat], zoom: 8,  bearing: 0, pitch: 0,  t: 0 },
+            { center: [lon, lat], zoom: 13, bearing: 0, pitch: 20, t: 2000 },
+            { center: [lon, lat], zoom: 18, bearing: 0, pitch: 50, t: 4000 }
           ];
         } else {
           // Update the final keyframe to center on the address
           const last = p.camera.keyframes[p.camera.keyframes.length - 1];
           last.center = [lon, lat];
-          if (typeof last.zoom !== 'number' || last.zoom < 15) last.zoom = 17;
+          // Ensure minimum close-up for address-level views
+          if (typeof last.zoom !== 'number' || last.zoom < 21) last.zoom = 24;
           // Ensure we have some pitch for street-level viewing
           if (typeof last.pitch !== 'number' || last.pitch < 30) last.pitch = 50;
         }
@@ -607,6 +639,17 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
       seg.phases = phases;
     }
     if (boundaryList.length) (p as any).boundaryGeoJSONs = boundaryList;
+
+    // Prefer the first segment's boundary as the top-level boundary when there is a single target
+    try {
+      const traceOnly = p.segments.filter((s:any)=>Array.isArray(s.phases) && s.phases.includes('trace'))
+      const pick = (traceOnly.length === 1 ? traceOnly[0] : (p.segments.length === 1 ? p.segments[0] : null))
+      if (!p.boundaryGeoJSON && pick?.boundaryGeoJSON) {
+        (p as any).boundaryGeoJSON = pick.boundaryGeoJSON
+        // If this is clearly a region/city, avoid forcing a country fallback later
+        // Do not overwrite p.border.isoA3 if present; player will prefer boundaryGeoJSON anyway
+      }
+    } catch {}
   }
 
   // Phase selection based on explicit prompt intent
