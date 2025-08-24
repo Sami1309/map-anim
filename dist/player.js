@@ -458,6 +458,78 @@ export class MapAnimPlayer {
         catch { }
         await new Promise(res => this.map.once('load', res));
     }
+    inferOrientationFromContainer() {
+        try {
+            const w = this.container?.clientWidth || this.lastSize?.w || 960;
+            const h = this.container?.clientHeight || this.lastSize?.h || 540;
+            if (!h)
+                return '16:9';
+            return (w / h) >= 1 ? '16:9' : '9:16';
+        }
+        catch {
+            return '16:9';
+        }
+    }
+    async prepareForProgramForRecord(program) {
+        // Clone shallow to avoid mutating the original program reference from the app
+        const p = JSON.parse(JSON.stringify(program || {}));
+        if (!p.output)
+            p.output = {};
+        // Determine desired orientation primarily from program.output, then provided dims, then container.
+        const ow = Number(p.output.width);
+        const oh = Number(p.output.height);
+        const hasDims = Number.isFinite(ow) && Number.isFinite(oh) && ow > 0 && oh > 0;
+        const close = (a, b) => Math.abs(a - b) / Math.max(1, Math.abs(b)) < 0.02;
+        // Optional orientation hint support: 'portrait' | 'landscape' | '9:16' | '16:9'
+        let orientHint = (p.output.orientation || p.output.aspect || p.output.ratio)
+            ? String(p.output.orientation || p.output.aspect || p.output.ratio).toLowerCase()
+            : undefined;
+        let desiredOrient;
+        if (orientHint) {
+            if (orientHint.includes('9:16') || orientHint.includes('portrait') || orientHint === '9x16')
+                desiredOrient = '9:16';
+            else if (orientHint.includes('16:9') || orientHint.includes('landscape') || orientHint === '16x9')
+                desiredOrient = '16:9';
+        }
+        if (!desiredOrient && hasDims)
+            desiredOrient = (ow / oh) >= 1 ? '16:9' : '9:16';
+        if (!desiredOrient)
+            desiredOrient = this.inferOrientationFromContainer();
+        const defRecord = desiredOrient === '16:9' ? { w: 1920, h: 1080 } : { w: 1080, h: 1920 };
+        if (!hasDims) {
+            // No dims provided: choose defaults for the desired orientation
+            p.output.width = defRecord.w;
+            p.output.height = defRecord.h;
+        }
+        else {
+            // Dims provided: respect them unless they contradict an explicit orientation hint
+            const ratio = ow / oh;
+            const is16x9 = close(ratio, 16 / 9);
+            const is9x16 = close(ratio, 9 / 16);
+            if (desiredOrient === '16:9' && is9x16) {
+                // Swap to match requested landscape
+                p.output.width = oh;
+                p.output.height = ow;
+            }
+            else if (desiredOrient === '9:16' && is16x9) {
+                // Swap to match requested portrait
+                p.output.width = oh;
+                p.output.height = ow;
+            }
+            else {
+                // Keep user-specified dimensions as-is; do not force canonical values
+                p.output.width = ow;
+                p.output.height = oh;
+            }
+        }
+        try {
+            console.log('[player] record: using output size', p.output.width, 'x', p.output.height, 'orient=', (p.output.width >= p.output.height ? '16:9' : '9:16'));
+        }
+        catch { }
+        await this.prepareForProgram(p);
+        // Keep lastProgram aligned so downstream calls use the record-configured program
+        this.lastProgram = p;
+    }
     async ensureDeckAndLoaders() {
         function loadScript(src) {
             return new Promise((res, rej) => {
@@ -1024,18 +1096,21 @@ export class MapAnimPlayer {
             throw new Error('player_not_initialized');
         this._isRecording = true;
         try {
-            await this.prepareForProgram(program);
+            program.output?.height = 1080
+            program.output?.width = 1920
+            await this.prepareForProgramForRecord(program);
             // Ensure first frame is rendered before starting recording
-            await this.seek(program, 0, /*bypass*/ true);
+            const activeProgram = this.lastProgram || program;
+            await this.seek(activeProgram, 0, /*bypass*/ true);
             const canvas = this.map.getCanvas();
-            const fps = Number(program.output?.fps || 30);
+            const fps = Number(activeProgram?.output?.fps || 30);
             const stream = canvas.captureStream ? canvas.captureStream(fps) : canvas.captureStream?.();
             if (!stream)
                 throw new Error('captureStream_not_supported');
             const chunks = [];
             const mime = opts?.mimeType || 'video/webm;codecs=vp9';
             const rec = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
-            const totalMs = this.getDuration(program);
+            const totalMs = this.getDuration(activeProgram);
             await new Promise((resolve, reject) => {
                 let stopped = false;
                 const stopAll = () => { if (stopped)
@@ -1060,7 +1135,7 @@ export class MapAnimPlayer {
                     const elapsed = now - t0;
                     const t = Math.min(totalMs, elapsed);
                     // Real-time preview update; bypass recording guard
-                    this.preview({ program, timeMs: t }, /*bypass*/ true);
+                    this.preview({ program: activeProgram, timeMs: t }, /*bypass*/ true);
                     if (elapsed >= totalMs) {
                         stopAll();
                         return;
