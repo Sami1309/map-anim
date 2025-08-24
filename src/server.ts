@@ -502,6 +502,8 @@ app.post("/api/resolve", async (req: Request, res: Response) => {
 // Augmentation pipeline: geocode, boundary, 3D flags; returns a new program copy
 async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapProgramType> {
   const p = JSON.parse(JSON.stringify(prog)) as any;
+  // Track if we resolved and anchored an address to avoid accidental overrides later
+  let didAddressZoom = false;
 
   // 3D fly-through triggers
   const t = (text || '').toLowerCase();
@@ -541,6 +543,37 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
     }
     return null;
   };
+  // Helper: compute a tight zoom to fit a bbox into the current output size
+  function computeZoomForBbox(bbox: number[] | undefined, width: number, height: number, paddingPx = 80, tileSize = 512): number | undefined {
+    try {
+      if (!bbox || bbox.length < 4) return undefined;
+      const [south, north, west, east] = bbox;
+      if (![south, north, west, east].every((v) => Number.isFinite(v))) return undefined;
+      const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+      const phi1 = clamp((north * Math.PI) / 180, -Math.PI / 2 + 1e-6, Math.PI / 2 - 1e-6);
+      const phi2 = clamp((south * Math.PI) / 180, -Math.PI / 2 + 1e-6, Math.PI / 2 - 1e-6);
+      const y1 = 0.5 - Math.log((1 + Math.sin(phi1)) / (1 - Math.sin(phi1))) / (4 * Math.PI);
+      const y2 = 0.5 - Math.log((1 + Math.sin(phi2)) / (1 - Math.sin(phi2))) / (4 * Math.PI);
+      const yDelta = Math.abs(y1 - y2);
+      let lonDelta = Math.abs(east - west);
+      if (lonDelta <= 0) lonDelta = 360; // fallback if broken
+      // account for world wrap: prefer smaller span
+      lonDelta = Math.min(lonDelta, 360 - lonDelta);
+      const availW = Math.max(1, width - 2 * (paddingPx || 0));
+      const availH = Math.max(1, height - 2 * (paddingPx || 0));
+      // required world pixel scale for both axes
+      const worldPxW = availW / (lonDelta / 360);
+      const worldPxH = availH / (yDelta || 1e-6);
+      const worldPx = Math.min(worldPxW, worldPxH); // fit both within view
+      const z = Math.log2(worldPx / tileSize);
+      if (!Number.isFinite(z)) return undefined;
+      // reasonable caps for address-level framing
+      return Math.max(12, Math.min(20, z));
+    } catch {
+      return undefined;
+    }
+  }
+
   if (p.extras?.address || (text && looksLikeAddress(text))) {
     try {
         console.log("extracting address")
@@ -566,30 +599,33 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
         console.log(`[augment] geocoded to: lat=${lat}, lon=${lon}`);
         console.log(`[augment] setting camera center to: [${lon}, ${lat}] (lon, lat order)`);
         console.log(`[augment] coordinate validation: lon range [-180,180]: ${lon}, lat range [-90,90]: ${lat}`);
-        
+        didAddressZoom = true;
+        const padding = (p?.animation?.fitPaddingPx ?? 80) as number;
+        const computed = computeZoomForBbox(data.bbox, Number(p?.output?.width || 1280), Number(p?.output?.height || 720), padding);
+        const finalZoom = Math.min(20, Math.max(17.5, computed ?? 18.5));
+        const midZoom = Math.max(12, Math.min(15, finalZoom - 4));
+        const startZoom = Math.max(6, Math.min(10, finalZoom - 9));
         if (!p.camera) p.camera = { keyframes: [] };
         if (!p.camera.keyframes?.length) {
-          // Create a nice zoom-in animation to the address
-          // Start from a regional view, then zoom to a realistic street-level close-up
+          // Create a steady zoom-in on the resolved address
           p.camera.keyframes = [
-            { center: [lon, lat], zoom: 8,  bearing: 0, pitch: 0,  t: 0 },
-            { center: [lon, lat], zoom: 13, bearing: 0, pitch: 20, t: 2000 },
-            { center: [lon, lat], zoom: 18, bearing: 0, pitch: 50, t: 4000 }
+            { center: [lon, lat], zoom: startZoom, bearing: 0, pitch: 0,  t: 0 },
+            { center: [lon, lat], zoom: midZoom,   bearing: 0, pitch: 20, t: 2000 },
+            { center: [lon, lat], zoom: finalZoom, bearing: 0, pitch: 50, t: 4000 }
           ];
         } else {
-          // Update the final keyframe to center on the address
+          // Keep LLM's path; only ensure final frame hits the resolved address tightly
           const last = p.camera.keyframes[p.camera.keyframes.length - 1];
           last.center = [lon, lat];
-          // Ensure minimum close-up for address-level views
-          if (typeof last.zoom !== 'number' || last.zoom < 21) last.zoom = 24;
-          // Ensure we have some pitch for street-level viewing
-          if (typeof last.pitch !== 'number' || last.pitch < 30) last.pitch = 50;
+          if (typeof last.zoom !== 'number' || !Number.isFinite(last.zoom)) last.zoom = finalZoom;
+          else last.zoom = Math.max(last.zoom, finalZoom);
+          if (typeof last.pitch !== 'number' || last.pitch < 40) last.pitch = 50;
         }
         
         // Set the address in extras for future reference
         if (!p.extras) p.extras = {};
         p.extras.address = addr;
-        console.log(p.camera.keyframes[1])
+        try { console.log('[augment] address keyframes preview:', p.camera.keyframes); } catch {}
       }
     } catch (e) { 
       console.warn('[augment] geocode failed', e); 
@@ -669,76 +705,7 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
   const ordered = ['zoom','highlight','trace','wait','hold'].filter(x => phasesSet.has(x));
   p.animation = { ...(p.animation||{}), phases: ordered.length ? ordered : ['zoom'] };
 
-  // Multi-zoom detection: "zoom into X ... then zoom into Y"
-  try {
-    const targets: string[] = [];
-    const re = /zoom\s+(?:into|to)\s+([^,.;]+?)(?=(?:,|\.|;|\band\s+then\b|\bthen\b|$))/gi;
-    let m: RegExpExecArray | null;
-    const inText = (text || '');
-    while ((m = re.exec(inText)) !== null) {
-      const name = (m[1] || '').trim();
-      if (name) targets.push(name);
-    }
-    if (targets.length >= 2) {
-      // Geocode first two targets and build segments with hold between
-      const pts = await Promise.all([geocode(targets[0]), geocode(targets[1])]);
-      const dur = 4000; const hold = 1000;
-      const startZoom = 6; const endZoom = 8.5;
-      const segs: any[] = [];
-      // Segment 1
-      segs.push({
-        camera: { keyframes: [
-          { center: [pts[0].lon, pts[0].lat], zoom: startZoom, bearing: 0, pitch: 0, t: 0 },
-          { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur }
-        ]},
-        extras: { boundaryName: targets[0] },
-        phases: ['zoom']
-      });
-      // Segment 2
-      segs.push({
-        camera: { keyframes: [
-          { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: 0 },
-          { center: [pts[1].lon, pts[1].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur }
-        ]},
-        extras: { boundaryName: targets[1] },
-        phases: ['zoom']
-      });
-
-      // If user asked to highlight/trace, include them in segment phases
-      const tLower = (text || '').toLowerCase();
-      const wantHighlight = tLower.includes('highlight');
-      const wantTrace = tLower.includes('trace');
-      segs.forEach((s) => {
-        // Insert highlight/trace after zoom
-        if (wantHighlight && !s.phases.includes('highlight')) s.phases.push('highlight');
-        if (wantTrace && !s.phases.includes('trace')) s.phases.push('trace');
-        // Always hold at end of each segment by default
-        if (!s.phases.includes('hold')) s.phases.push('hold');
-      });
-
-      // Fetch boundaries for segments
-      for (const s of segs) {
-        try {
-          const gj = await fetchNominatimBoundary(s.extras.boundaryName);
-          s.boundaryGeoJSON = gj;
-        } catch (e) {
-          try { s.boundaryGeoJSON = await fetchBoundaryGeoJSON(s.extras.boundaryName); } catch {}
-        }
-      }
-      p.segments = segs;
-      // Also set top-level camera as a concatenation for systems that ignore segments
-      p.camera = { keyframes: [
-        { center: [pts[0].lon, pts[0].lat], zoom: startZoom, bearing: 0, pitch: 0, t: 0 },
-        { center: [pts[0].lon, pts[0].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur },
-        { center: [pts[1].lon, pts[1].lat], zoom: endZoom, bearing: 0, pitch: 0, t: dur + hold + dur }
-      ]};
-      if (!p.animation?.phases || p.animation.phases.length <= 1) {
-        p.animation = { ...(p.animation || {}), phases: ['zoom','hold','zoom'] };
-      }
-    }
-  } catch (e) {
-    console.warn('[augment] multi-zoom detection failed', (e as any)?.message || e);
-  }
+  // Removed multi-zoom auto-detection: rely on LLM to plan segments and keyframes explicitly
 
   console.log("new is", p.camera.keyframes[1])
   return p;
