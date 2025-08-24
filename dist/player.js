@@ -652,7 +652,8 @@ export class MapAnimPlayer {
         await this.prepareForProgram(program);
         // Access shared animation helpers imported at module load
         const anim = AnimationCore;
-        const phases = (program.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
+        const phases = (program.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
         const duration = program.camera?.keyframes?.at(-1)?.t || 0;
         const easeName = program.animation?.easing || 'easeOutCubic';
         const ease = anim.EASING?.[easeName] || anim.EASING.easeOutCubic;
@@ -693,7 +694,8 @@ export class MapAnimPlayer {
     getDuration(program) {
         if (!program)
             return 3000;
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
@@ -723,7 +725,8 @@ export class MapAnimPlayer {
         this.lastProgram = program;
         await waitStyleReady(this.map, 400);
         const anim = AnimationCore;
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
@@ -852,7 +855,8 @@ export class MapAnimPlayer {
             return;
         const tMs = Math.max(0, Number(opts.timeMs) || 0);
         const anim = AnimationCore;
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
+        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));

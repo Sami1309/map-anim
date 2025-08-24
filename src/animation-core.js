@@ -176,8 +176,11 @@ export async function runPreviewAnimation(map, program) {
 
 // Execute full animation sequence with phases (for web app preview)
 export async function runAnimationSequence(map, program) {
-  const phases = (program.animation?.phases && program.animation.phases.length) ? 
-    program.animation.phases : ['zoom','trace','hold'];
+  // Default phases: only trace when a border is defined
+  const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON)
+  const phases = (program.animation?.phases && program.animation.phases.length)
+    ? program.animation.phases
+    : (hasBorder ? ['zoom','trace','hold'] : ['zoom']);
   
   const duration = program.camera.keyframes.at(-1).t;
   const easeName = program.animation?.easing || 'easeOutCubic';
