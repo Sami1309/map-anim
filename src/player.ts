@@ -312,6 +312,7 @@ export class MapAnimPlayer {
   private deckOverlay?: any;
   private lastGoogle3dKey?: string;
   private lastProgram?: any;
+  private _isRecording: boolean = false;
 
   static async create(opts: PlayerOptions) {
     const p = new MapAnimPlayer(opts);
@@ -488,8 +489,9 @@ export class MapAnimPlayer {
     } catch {}
   }
 
-  async play(program: ResolvedProgram, opts?: PlayOptions & { onPhaseStart?: (name: string)=>void; onPhaseEnd?: (name: string)=>void; signal?: AbortSignal }) {
+  async play(program: ResolvedProgram, opts?: PlayOptions & { onPhaseStart?: (name: string)=>void; onPhaseEnd?: (name: string)=>void; signal?: AbortSignal }, _bypassRecordGuard: boolean = false) {
     if (!this.map) throw new Error('player_not_initialized');
+    if (this._isRecording && !_bypassRecordGuard) { try { console.warn('[player] play() suppressed during recording'); } catch {} return; }
     try { (this.map as any).stop?.(); } catch {}
     await this.prepareForProgram(program);
 
@@ -541,8 +543,9 @@ export class MapAnimPlayer {
   }
 
   // Move visual state to a specific time (ms) on the full timeline
-  async seek(program: any, tMs: number) {
+  async seek(program: any, tMs: number, _bypassRecordGuard: boolean = false) {
     if (!this.map) throw new Error('player_not_initialized');
+    if (this._isRecording && !_bypassRecordGuard) { try { console.warn('[player] seek() suppressed during recording'); } catch {} return; }
     if (!program) return;
     this.lastProgram = program;
     await waitStyleReady(this.map, 400);
@@ -633,8 +636,9 @@ export class MapAnimPlayer {
   }
 
   // Faster, synchronous preview that does not wait on style events. Uses last prepared program if not supplied.
-  preview(opts: { program?: any; timeMs: number }) {
+  preview(opts: { program?: any; timeMs: number }, _bypassRecordGuard: boolean = false) {
     if (!this.map) throw new Error('player_not_initialized');
+    if (this._isRecording && !_bypassRecordGuard) { try { console.warn('[player] preview() suppressed during recording'); } catch {} return; }
     const program = opts.program || this.lastProgram;
     if (!program) return;
     const tMs = Math.max(0, Number(opts.timeMs) || 0);
@@ -723,42 +727,62 @@ export class MapAnimPlayer {
     try { (this.map as any).triggerRepaint?.(); } catch {}
   }
 
-  setTime(ms: number) {
-    return this.preview({ timeMs: ms })
+  setTime(ms: number, _bypassRecordGuard: boolean = false) {
+    if (this._isRecording && !_bypassRecordGuard) { try { console.warn('[player] setTime() suppressed during recording'); } catch {} return; }
+    return this.preview({ timeMs: ms }, _bypassRecordGuard)
   }
 
-  setProgress(p: number) {
+  setProgress(p: number, _bypassRecordGuard: boolean = false) {
     const prog = this.lastProgram;
     if (!prog) return;
     const total = this.getDuration(prog);
     const ms = Math.max(0, Math.min(1, Number(p) || 0)) * total;
-    return this.preview({ timeMs: ms })
+    return this.preview({ timeMs: ms }, _bypassRecordGuard)
   }
   async record(program: ResolvedProgram, opts?: RecordOptions & { signal?: AbortSignal }): Promise<Blob> {
     if (!this.map) throw new Error('player_not_initialized');
-    await this.prepareForProgram(program);
-    // Ensure first frame is rendered before starting recording
-    await this.seek(program, 0);
-    await new Promise(res => requestAnimationFrame(() => res(undefined)));
+    this._isRecording = true;
+    try {
+      await this.prepareForProgram(program);
+      // Ensure first frame is rendered before starting recording
+      await this.seek(program, 0, /*bypass*/ true);
 
-    const canvas: HTMLCanvasElement = this.map.getCanvas();
-    const fps = Number(program.output?.fps || 30);
-    const stream = (canvas as any).captureStream ? (canvas as any).captureStream(fps) : (canvas as any).captureStream?.();
-    if (!stream) throw new Error('captureStream_not_supported');
+      const canvas: HTMLCanvasElement = this.map.getCanvas();
+      const fps = Number(program.output?.fps || 30);
+      const stream = (canvas as any).captureStream ? (canvas as any).captureStream(fps) : (canvas as any).captureStream?.();
+      if (!stream) throw new Error('captureStream_not_supported');
 
-    const chunks: BlobPart[] = [];
-    const mime = opts?.mimeType || 'video/webm;codecs=vp9';
-    const rec: MediaRecorder = new (window as any).MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
-    await new Promise<void>((resolve, reject) => {
-      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-      rec.onstop = () => resolve();
-      rec.onerror = (e) => reject((e as any)?.error || e);
-      rec.start(Math.round(1000 / fps)); // timeslice flush
-      // High-fidelity playback while recording by default
-      const playOpts: any = { ...(opts || {}), waitForTiles: opts?.waitForTiles !== false };
-      this.play(program, playOpts).then(() => rec.stop()).catch((e) => { try { rec.stop(); } catch {} reject(e); });
-    });
-    return new Blob(chunks, { type: mime });
+      const chunks: BlobPart[] = [];
+      const mime = opts?.mimeType || 'video/webm;codecs=vp9';
+      const rec: MediaRecorder = new (window as any).MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
+
+      const totalMs = this.getDuration(program);
+      await new Promise<void>((resolve, reject) => {
+        let stopped = false;
+        const stopAll = () => { if (stopped) return; stopped = true; try { rec.stop(); } catch {} };
+        rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        rec.onstop = () => resolve();
+        rec.onerror = (e) => reject((e as any)?.error || e);
+        rec.start(); // contiguous recording; stream controls the frame rate
+
+        const t0 = performance.now();
+        const step = () => {
+          if (stopped) return;
+          if (opts?.signal?.aborted) { stopAll(); return; }
+          const now = performance.now();
+          const elapsed = now - t0;
+          const t = Math.min(totalMs, elapsed);
+          // Real-time preview update; bypass recording guard
+          this.preview({ program, timeMs: t }, /*bypass*/ true);
+          if (elapsed >= totalMs) { stopAll(); return; }
+          requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+      return new Blob(chunks, { type: mime });
+    } finally {
+      this._isRecording = false;
+    }
   }
 }
 

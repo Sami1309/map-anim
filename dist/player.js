@@ -419,6 +419,7 @@ export class MapAnimPlayer {
     deckOverlay;
     lastGoogle3dKey;
     lastProgram;
+    _isRecording = false;
     static async create(opts) {
         const p = new MapAnimPlayer(opts);
         await p.init();
@@ -516,7 +517,15 @@ export class MapAnimPlayer {
             return;
         }
         const root = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`;
-        const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, loadOptions: { '3d-tiles': { maximumScreenSpaceError: 1.5 } }, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
+        const layer = new deckNS.Tile3DLayer({
+            id: 'google-3d',
+            data: root,
+            loader: Tiles3DLoader,
+            // Nudge quality higher: request finer LOD by lowering screen-space error
+            loadOptions: { '3d-tiles': { maximumScreenSpaceError: 1.5 } },
+            opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1),
+            pickable: false
+        });
         if (!this.deckOverlay) {
             this.deckOverlay = new deckNS.MapboxOverlay({ interleaved: true, layers: [layer] });
             try {
@@ -642,9 +651,16 @@ export class MapAnimPlayer {
         }
         catch { }
     }
-    async play(program, opts) {
+    async play(program, opts, _bypassRecordGuard = false) {
         if (!this.map)
             throw new Error('player_not_initialized');
+        if (this._isRecording && !_bypassRecordGuard) {
+            try {
+                console.warn('[player] play() suppressed during recording');
+            }
+            catch { }
+            return;
+        }
         try {
             this.map.stop?.();
         }
@@ -652,8 +668,7 @@ export class MapAnimPlayer {
         await this.prepareForProgram(program);
         // Access shared animation helpers imported at module load
         const anim = AnimationCore;
-        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
-        const phases = (program.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
+        const phases = (program.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
         const duration = program.camera?.keyframes?.at(-1)?.t || 0;
         const easeName = program.animation?.easing || 'easeOutCubic';
         const ease = anim.EASING?.[easeName] || anim.EASING.easeOutCubic;
@@ -694,8 +709,7 @@ export class MapAnimPlayer {
     getDuration(program) {
         if (!program)
             return 3000;
-        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
@@ -717,16 +731,22 @@ export class MapAnimPlayer {
         return total || duration || 3000;
     }
     // Move visual state to a specific time (ms) on the full timeline
-    async seek(program, tMs) {
+    async seek(program, tMs, _bypassRecordGuard = false) {
         if (!this.map)
             throw new Error('player_not_initialized');
+        if (this._isRecording && !_bypassRecordGuard) {
+            try {
+                console.warn('[player] seek() suppressed during recording');
+            }
+            catch { }
+            return;
+        }
         if (!program)
             return;
         this.lastProgram = program;
         await waitStyleReady(this.map, 400);
         const anim = AnimationCore;
-        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
@@ -847,16 +867,22 @@ export class MapAnimPlayer {
         catch { }
     }
     // Faster, synchronous preview that does not wait on style events. Uses last prepared program if not supplied.
-    preview(opts) {
+    preview(opts, _bypassRecordGuard = false) {
         if (!this.map)
             throw new Error('player_not_initialized');
+        if (this._isRecording && !_bypassRecordGuard) {
+            try {
+                console.warn('[player] preview() suppressed during recording');
+            }
+            catch { }
+            return;
+        }
         const program = opts.program || this.lastProgram;
         if (!program)
             return;
         const tMs = Math.max(0, Number(opts.timeMs) || 0);
         const anim = AnimationCore;
-        const hasBorder = !!(program?.border) || !!(program?.boundaryGeoJSON);
-        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : (hasBorder ? ['zoom', 'trace', 'hold'] : ['zoom']);
+        const phases = (program?.animation?.phases && program.animation.phases.length) ? program.animation.phases : ['zoom', 'trace', 'hold'];
         const duration = program?.camera?.keyframes?.at?.(-1)?.t || 0;
         const waitMs = Math.max(0, Number(program.animation?.waitBeforeTraceMs || 0));
         const traceMs = Math.max(0, Number(program.border?.traceDurationMs ?? 3000));
@@ -975,46 +1001,79 @@ export class MapAnimPlayer {
         }
         catch { }
     }
-    setTime(ms) {
-        return this.preview({ timeMs: ms });
+    setTime(ms, _bypassRecordGuard = false) {
+        if (this._isRecording && !_bypassRecordGuard) {
+            try {
+                console.warn('[player] setTime() suppressed during recording');
+            }
+            catch { }
+            return;
+        }
+        return this.preview({ timeMs: ms }, _bypassRecordGuard);
     }
-    setProgress(p) {
+    setProgress(p, _bypassRecordGuard = false) {
         const prog = this.lastProgram;
         if (!prog)
             return;
         const total = this.getDuration(prog);
         const ms = Math.max(0, Math.min(1, Number(p) || 0)) * total;
-        return this.preview({ timeMs: ms });
+        return this.preview({ timeMs: ms }, _bypassRecordGuard);
     }
     async record(program, opts) {
         if (!this.map)
             throw new Error('player_not_initialized');
-        await this.prepareForProgram(program);
-        // Ensure first frame is rendered before starting recording
-        await this.seek(program, 0);
-        await new Promise(res => requestAnimationFrame(() => res(undefined)));
-        const canvas = this.map.getCanvas();
-        const fps = Number(program.output?.fps || 30);
-        const stream = canvas.captureStream ? canvas.captureStream(fps) : canvas.captureStream?.();
-        if (!stream)
-            throw new Error('captureStream_not_supported');
-        const chunks = [];
-        const mime = opts?.mimeType || 'video/webm;codecs=vp9';
-        const rec = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
-        await new Promise((resolve, reject) => {
-            rec.ondataavailable = (e) => { if (e.data && e.data.size)
-                chunks.push(e.data); };
-            rec.onstop = () => resolve();
-            rec.onerror = (e) => reject(e?.error || e);
-            rec.start(Math.round(1000 / fps)); // timeslice flush
-            // High-fidelity playback while recording by default
-            const playOpts = { ...(opts || {}), waitForTiles: opts?.waitForTiles !== false };
-            this.play(program, playOpts).then(() => rec.stop()).catch((e) => { try {
-                rec.stop();
-            }
-            catch { } reject(e); });
-        });
-        return new Blob(chunks, { type: mime });
+        this._isRecording = true;
+        try {
+            await this.prepareForProgram(program);
+            // Ensure first frame is rendered before starting recording
+            await this.seek(program, 0, /*bypass*/ true);
+            const canvas = this.map.getCanvas();
+            const fps = Number(program.output?.fps || 30);
+            const stream = canvas.captureStream ? canvas.captureStream(fps) : canvas.captureStream?.();
+            if (!stream)
+                throw new Error('captureStream_not_supported');
+            const chunks = [];
+            const mime = opts?.mimeType || 'video/webm;codecs=vp9';
+            const rec = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: opts?.videoBitsPerSecond || 8_000_000 });
+            const totalMs = this.getDuration(program);
+            await new Promise((resolve, reject) => {
+                let stopped = false;
+                const stopAll = () => { if (stopped)
+                    return; stopped = true; try {
+                    rec.stop();
+                }
+                catch { } };
+                rec.ondataavailable = (e) => { if (e.data && e.data.size)
+                    chunks.push(e.data); };
+                rec.onstop = () => resolve();
+                rec.onerror = (e) => reject(e?.error || e);
+                rec.start(); // contiguous recording; stream controls the frame rate
+                const t0 = performance.now();
+                const step = () => {
+                    if (stopped)
+                        return;
+                    if (opts?.signal?.aborted) {
+                        stopAll();
+                        return;
+                    }
+                    const now = performance.now();
+                    const elapsed = now - t0;
+                    const t = Math.min(totalMs, elapsed);
+                    // Real-time preview update; bypass recording guard
+                    this.preview({ program, timeMs: t }, /*bypass*/ true);
+                    if (elapsed >= totalMs) {
+                        stopAll();
+                        return;
+                    }
+                    requestAnimationFrame(step);
+                };
+                requestAnimationFrame(step);
+            });
+            return new Blob(chunks, { type: mime });
+        }
+        finally {
+            this._isRecording = false;
+        }
     }
 }
 export async function createPlayer(opts) {
