@@ -664,8 +664,8 @@ async function augmentProgram(prog, text) {
                     // Create a steady zoom-in on the resolved address
                     p.camera.keyframes = [
                         { center: [lon, lat], zoom: startZoom, bearing: 0, pitch: 0, t: 0 },
-                        { center: [lon, lat], zoom: midZoom, bearing: 0, pitch: 20, t: 2000 },
-                        { center: [lon, lat], zoom: finalZoom, bearing: 0, pitch: 50, t: 4000 }
+                        { center: [lon, lat], zoom: midZoom, bearing: 0, pitch: 12, t: 2000 },
+                        { center: [lon, lat], zoom: finalZoom, bearing: 0, pitch: 35, t: 4000 }
                     ];
                 }
                 else {
@@ -676,8 +676,8 @@ async function augmentProgram(prog, text) {
                         last.zoom = finalZoom;
                     else
                         last.zoom = Math.max(last.zoom, finalZoom);
-                    if (typeof last.pitch !== 'number' || last.pitch < 40)
-                        last.pitch = 50;
+                    if (typeof last.pitch !== 'number' || last.pitch > 45)
+                        last.pitch = 35;
                 }
                 // Set the address in extras for future reference
                 if (!p.extras)

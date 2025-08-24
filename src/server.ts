@@ -607,11 +607,11 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
         const startZoom = Math.max(6, Math.min(10, finalZoom - 9));
         if (!p.camera) p.camera = { keyframes: [] };
         if (!p.camera.keyframes?.length) {
-          // Create a steady zoom-in on the resolved address
+          // Create a steady zoom-in on the resolved address with a more top-down (bird's-eye) pitch
           p.camera.keyframes = [
             { center: [lon, lat], zoom: startZoom, bearing: 0, pitch: 0,  t: 0 },
-            { center: [lon, lat], zoom: midZoom,   bearing: 0, pitch: 20, t: 2000 },
-            { center: [lon, lat], zoom: finalZoom, bearing: 0, pitch: 50, t: 4000 }
+            { center: [lon, lat], zoom: midZoom,   bearing: 0, pitch: 12, t: 2000 },
+            { center: [lon, lat], zoom: finalZoom, bearing: 0, pitch: 35, t: 4000 }
           ];
         } else {
           // Keep LLM's path; only ensure final frame hits the resolved address tightly
@@ -619,7 +619,8 @@ async function augmentProgram(prog: MapProgramType, text?: string): Promise<MapP
           last.center = [lon, lat];
           if (typeof last.zoom !== 'number' || !Number.isFinite(last.zoom)) last.zoom = finalZoom;
           else last.zoom = Math.max(last.zoom, finalZoom);
-          if (typeof last.pitch !== 'number' || last.pitch < 40) last.pitch = 50;
+          // Reduce overly shallow angles; prefer a more top-down view (~35deg)
+          if (typeof last.pitch !== 'number' || last.pitch > 45) last.pitch = 35;
         }
         
         // Set the address in extras for future reference

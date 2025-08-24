@@ -394,7 +394,15 @@ export class MapAnimPlayer {
     const Tiles3DLoader = loaders3d?.Tiles3DLoader || (loaders3d && loaders3d['Tiles3DLoader']);
     if (!deckNS || !Tiles3DLoader) { try { console.warn('[player] deck.gl not available for 3D overlay'); } catch {} return; }
     const root = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`;
-    const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
+    const layer = new deckNS.Tile3DLayer({
+      id: 'google-3d',
+      data: root,
+      loader: Tiles3DLoader,
+      // Nudge quality higher: request finer LOD by lowering screen-space error
+      loadOptions: { '3d-tiles': { maximumScreenSpaceError: 1.5 } },
+      opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1),
+      pickable: false
+    });
     if (!this.deckOverlay) {
       this.deckOverlay = new deckNS.MapboxOverlay({ interleaved: true, layers: [layer] });
       try { this.map.addControl(this.deckOverlay as any); } catch {}

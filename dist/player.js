@@ -516,7 +516,7 @@ export class MapAnimPlayer {
             return;
         }
         const root = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`;
-        const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
+        const layer = new deckNS.Tile3DLayer({ id: 'google-3d', data: root, loader: Tiles3DLoader, loadOptions: { '3d-tiles': { maximumScreenSpaceError: 1.5 } }, opacity: (typeof program?.flags?.google3dOpacity === 'number' ? program.flags.google3dOpacity : 1), pickable: false });
         if (!this.deckOverlay) {
             this.deckOverlay = new deckNS.MapboxOverlay({ interleaved: true, layers: [layer] });
             try {
